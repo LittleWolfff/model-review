@@ -268,8 +268,10 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.blob();
     }).then(function(b){
+      /* 显示时去掉上传时加的唯一后缀（xxx__a1b2c3.glb → xxx.glb） */
+      var 显示 = 名.replace(/__[0-9a-z]+\.glb$/i, '.glb');
       var f;
-      try{ f = new File([b], 名); }catch(e){ f = b; try{ f.name = 名; }catch(e2){} }
+      try{ f = new File([b], 显示); }catch(e){ f = b; try{ f.name = 显示; }catch(e2){} }
       load(f, 'cloud');
     }).catch(function(e){
       if (第几次 < 5){
@@ -322,9 +324,12 @@
   function 云端转(file){
     var 框 = document.getElementById('iName');
     var 原名 = file.name || 'model.fbx';
+    /* 每次上传带唯一后缀：不然同一个模型改了再传，/status 会读到上一次的 GLB，
+       立刻说"转好了"，拿到的永远是旧结果。 */
+    var 唯一 = 原名.replace(/\.fbx$/i, '') + '__' + Date.now().toString(36);
     框.style.color = '';
     框.textContent = '① 上传中…（' + 原名 + '）';
-    fetch(中转 + '/upload?name=' + encodeURIComponent(原名), { method: 'POST', body: file })
+    fetch(中转 + '/upload?name=' + encodeURIComponent(唯一 + '.fbx'), { method: 'POST', body: file })
       .then(function(r){ return r.json(); })
       .then(function(d){
         if (!d || !d.ok) throw new Error((d && d.error) || '上传失败');
