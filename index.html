@@ -308,7 +308,9 @@
 
   function 轮询转换(名, 次){
     var 框 = document.getElementById('iName');
-    if (次 >= 12){
+    /* 24 次 × 5 秒 = 2 分钟：Actions 排队 + 转换 + 推送，正常 40~70 秒，
+       碰上 GitHub 慢的时候 1 分钟不够，放宽到 2 分钟再报超时 */
+    if (次 >= 24){
       框.textContent = '等太久了，云端可能还在转。过一会儿刷新页面再拖一次。';
       框.style.color = '#c2410c';
       return;
