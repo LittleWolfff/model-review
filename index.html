@@ -112,6 +112,9 @@
   </div>
   <button class="sb-new" id="sbNew">+ 打开模型</button>
   <div class="sb-list" id="sbList"></div>
+  <!-- 仓库里的模型：云端 Actions 用官方 FBX SDK 转好的 GLB（models/index.json） -->
+  <div style="margin:14px 0 6px;font-size:12px;color:#9c938a">仓库里的模型（云端转好）</div>
+  <div class="sb-list" id="仓库列表"></div>
 </aside>
 
 <header>
@@ -241,7 +244,13 @@
       d.title = it.name;
       var dot = document.createElement('span'); dot.className = 'dot';
       var nm = document.createElement('span'); nm.className = 'nm';
-      nm.textContent = it.name;
+      /* 名字后面标清楚这份是怎么来的 —— 同一个文件可能存了好几条，
+         不标的话根本分不清哪条是网页转的、哪条是官方 SDK 转的 */
+      var 来源 = it.转换 === 'assimp' ? '（网页转·Assimp）'
+               : it.转换 === 'three'  ? '（网页转·three）'
+               : '';
+      nm.textContent = (it.name || '模型') + 来源;
+      nm.title = 来源 || '直接拖进来的 GLB';
       var rm = document.createElement('span'); rm.className = 'ren';
       rm.setAttribute('data-del', it.id); rm.title = '从列表里去掉'; rm.textContent = '×';
       d.appendChild(dot); d.appendChild(nm); d.appendChild(rm);
@@ -261,6 +270,44 @@
       e.textContent = '还没有看过的模型';
       pv.appendChild(e);
     }
+  }
+
+  /* ===== 仓库里的模型（云端 Actions 用官方 FBX SDK 转好的）=====
+     为什么有这一块：浏览器里那两个转换器都只实现 FBX 的一部分，美术导出的文件
+     经常骨架错位 / 小部件飞天。云端用 FBX2glTF（官方 SDK，和 UE/Maya 同一套）转，
+     结果就是对的 —— 所以让美术把 .fbx 传进仓库的 inbox/，这里直接列出来。 */
+  function 载入远程(名){
+    document.getElementById('iName').textContent = '正在下载 ' + 名 + ' …';
+    fetch('models/' + encodeURIComponent(名), {cache: 'no-cache'}).then(function(r){
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.blob();
+    }).then(function(b){
+      var f;
+      try{ f = new File([b], 名); }catch(e){ f = b; try{ f.name = 名; }catch(e2){} }
+      load(f);
+    }).catch(function(e){
+      document.getElementById('iName').textContent = '下载失败：' + e.message;
+    });
+  }
+  function 列仓库模型(){
+    fetch('models/index.json', {cache: 'no-cache'}).then(function(r){
+      return r.ok ? r.json() : [];
+    }).then(function(列表){
+      var 盒 = document.getElementById('仓库列表');
+      if (!盒) return;
+      盒.innerHTML = '';
+      (列表 || []).forEach(function(it){
+        var d = document.createElement('div');
+        d.className = 'sb-item';
+        var dot = document.createElement('span'); dot.className = 'dot';
+        var nm = document.createElement('span'); nm.className = 'nm';
+        nm.textContent = it.name;
+        d.appendChild(dot); d.appendChild(nm);
+        d.title = '点开加载（' + Math.max(1, Math.round((it.size || 0) / 1024)) + ' KB）';
+        d.addEventListener('click', function(){ 载入远程(it.name); });
+        盒.appendChild(d);
+      });
+    }).catch(function(){});
   }
 
   function show(name, blobOrFile, id){
@@ -315,7 +362,8 @@
       })(0);
       return;
     }
-    var it = { id: putBlob(file), name: file.name || '（没名字）', ts: Date.now(), v: 转换版本 };
+    var it = { id: putBlob(file), name: file.name || '（没名字）', ts: Date.now(), v: 转换版本,
+               转换: (window.fbxToGlb && window.fbxToGlb.方式) || '' };
     items.unshift(it);
     curId = it.id;
     saveMeta(); renderList(); show(it.name, file);
@@ -408,6 +456,7 @@
     if (curId) openItem(curId);
     saveMeta();
     从网址加载();     // 网址里点了名的那个优先
+    列仓库模型();     // 云端转好的那份（models/index.json）
   });
 })();
 </script>

@@ -1,0 +1,57 @@
+name: FBX 转 GLB
+
+# 干什么：把 inbox/ 里的 .fbx 用 **官方 FBX SDK**（FBX2glTF）转成 models/*.glb，
+# 再把结果提交回仓库。网站侧栏就能直接列出这些 GLB。
+#
+# 为什么不在网页里转：浏览器里那两个库（three / Assimp）都只实现 FBX 的一部分，
+# 美术导出的文件经常「骨架错位 / 眼珠飞天」。官方 SDK 才和 UE / Maya 一致。
+
+on:
+  push:
+    paths:
+      - "inbox/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 FBX2glTF（官方 FBX SDK）
+        run: |
+          curl -sSL -o /usr/local/bin/fbx2gltf \
+            https://github.com/facebookincubator/FBX2glTF/releases/download/v0.9.7/FBX2glTF-linux-x64
+          chmod +x /usr/local/bin/fbx2gltf
+          fbx2gltf --version || true
+
+      - name: 逐个转换
+        run: |
+          mkdir -p models
+          shopt -s nullglob nocaseglob
+          for f in inbox/*.fbx; do
+            name=$(basename "$f"); name="${name%.*}"
+            echo "=== $f → models/$name.glb"
+            fbx2gltf --binary --input "$f" --output "models/$name" || echo "!! 转换失败：$f"
+          done
+
+      - name: 生成模型清单
+        run: |
+          python3 -c "
+import json, os
+files = sorted(f for f in os.listdir('models') if f.lower().endswith('.glb'))
+data = [{'name': f, 'size': os.path.getsize(os.path.join('models', f))} for f in files]
+json.dump(data, open('models/index.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+print('清单里 %d 个模型' % len(data))
+"
+
+      - name: 提交回去
+        run: |
+          git config user.name "model-review-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add models inbox
+          git diff --cached --quiet && echo "没有变化" || git commit -m "自动转换 FBX → GLB"
+          git push
