@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>模型验收 · AI 角色管线</title>
+<!-- ============================================================
+     glbview 的**单独调试台** —— 不用开整个网站，把一个 .glb 拖进来就能看。
+
+     它跟网站用的是**同一份渲染源码**（下面那段 module 由 build.py 内联，
+     跟 网站/index.html 里那份永远一致）。
+
+     ⚠️ 这个文件里的 `<script type="module">` 段是生成的，别手改 ——
+        改 `glbview/viewer.js` 然后跑 `python glbview/build.py`。
+
+     以后加「显示布线」「法线可视化」「UV 检查」这类东西：
+       1. 在 viewer.js 里实现（对外挂 window.glbXxx）
+       2. 想在这儿试，就加个按钮/开关到下面的工具栏，调那个接口
+     ============================================================ -->
+<style>
+  :root{
+    --bg:#faf6f0; --text:#3d3833; --dim:#9c938a;
+    --accent:#e8925a; --hair:#ece2d5; --hair-strong:#e0d3c2;
+  }
+  *{ box-sizing:border-box; }
+
+  /* ---------- 左侧栏：打开过的模型（照抄 网站/app.css 那份，这个单元自带样式） ----------
+     阿聪 2026-10-05：「不是叫你所有 module 全都做吗」—— 看模型这一格也留个"看过哪些"，
+     不用每次重新拖。规矩见 ../../modules_debug/架构.md 2.9。 */
+  #sbSide{
+    position:fixed; left:0; top:0; bottom:0; width:246px; z-index:40;
+    background:#fffdfa; border-right:1px solid var(--hair);
+    display:flex; flex-direction:column; padding:14px 12px; gap:12px;
+  }
+  .sb-preview{
+    flex:none; height:150px; border:1px solid var(--hair); border-radius:12px;
+    background:linear-gradient(180deg,#fffdfa,#fbf6ef);
+    display:flex; align-items:center; justify-content:center; overflow:hidden;
+  }
+  .sb-preview > img{ width:100%; height:100%; object-fit:contain; display:block; }
+  .sb-preview .sb-empty{ font-size:12px; color:var(--dim); text-align:center; padding:0 10px; line-height:1.5; }
+  .sb-new{
+    flex:none; width:100%; padding:9px 12px; border-radius:10px; cursor:pointer;
+    border:1px dashed var(--hair-strong); background:transparent;
+    color:#8a7b68; font:inherit; font-size:13px;
+  }
+  .sb-new:hover{ color:#8a4b1e; border-color:#f0c9a4; background:rgba(253,240,228,.5); }
+  .sb-list{ flex:1; min-height:0; overflow-y:auto; }
+  .sb-item{
+    display:flex; align-items:center; gap:9px; padding:9px 11px; border-radius:9px;
+    cursor:pointer; color:var(--dim); font-size:13px; margin-bottom:4px;
+    border:1px solid transparent; transition:all .15s ease;
+  }
+  .sb-item:hover{ background:rgba(253,240,228,.5); color:var(--text); }
+  .sb-item.on{
+    background:linear-gradient(180deg,#fdf0e4,#fae6d3);
+    border-color:#f0c9a4; color:#8a4b1e; font-weight:600;
+  }
+  .sb-item .dot{ flex:none; width:7px; height:7px; border-radius:50%; background:#d8cdbd; }
+  .sb-item.on .dot{ background:#e8925a; }
+  .sb-item .nm{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sb-item .ren{ flex:none; opacity:0; font-size:12px; color:#c2b3a0; padding:0 3px; transition:opacity .15s ease; }
+  .sb-item:hover .ren{ opacity:1; }
+  .sb-item .ren:hover{ color:#8a4b1e; }
+  body{
+    margin:0; min-height:100vh; padding-left:246px;   /* 让开左边那条 */
+    background:var(--bg); color:var(--text);
+    font:14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header{
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    padding:14px 22px; background:#fff; border-bottom:1px solid var(--hair);
+  }
+  header b{ font-size:15px; }
+  header .hint{ font-size:12.5px; color:var(--dim); }
+  header input[type=file]{ font:inherit; font-size:12.5px; }
+  main{
+    max-width:1180px; margin:0 auto; padding:20px 22px 60px;
+    display:flex; flex-direction:column; gap:16px;
+  }
+  /* 拖放区 —— 没加载模型时最显眼 */
+  #drop{
+    border:2px dashed var(--hair-strong); border-radius:16px;
+    background:#fff; padding:34px 20px; text-align:center;
+    color:var(--dim); cursor:pointer; transition:all .15s;
+  }
+  #drop:hover, #drop.over{ border-color:var(--accent); color:var(--accent); background:#fff8f2; }
+  #drop b{ display:block; font-size:15px; color:var(--text); margin-bottom:6px; }
+  /* 信息面板 —— 现在只报面数，以后要加布线/法线就挂这儿 */
+  .panel{
+    display:flex; gap:26px; flex-wrap:wrap;
+    background:#fff; border:1px solid var(--hair); border-radius:14px;
+    padding:14px 20px;
+  }
+  .panel .k{ font-size:12px; color:var(--dim); }
+  .panel .v{ font-size:16px; font-weight:600; }
+  .panel .v small{ font-size:12px; font-weight:400; color:var(--dim); }
+
+  /* ===== 下面是 viewer.js 要的弹层 DOM 用的样式（跟网站里那套一致）===== */
+  /* 「显示布线」开着的样子（跟网站那边用同一个 class，别各写一套）*/
+  /* 画布左下角那行小字里的面数（阿聪 2026-10-04：「像你之前给我的 glb 页面预览那样，
+     只是显示个小字在预览窗口」）—— 数字比说明文字醒目一点 */
+
+</style>
+</head>
+<body>
+
+<!-- 左侧栏：这个单元**打开过的模型**（一条 = 一个看过的 glb）。
+     点一条重新加载，× 从列表里去掉。模型本体存在 IndexedDB 里，关掉再开还在。 -->
+<aside id="sbSide">
+  <div class="sb-preview" id="sbPreview">
+    <div class="sb-empty">还没有看过的模型</div>
+  </div>
+  <button class="sb-new" id="sbNew">+ 打开模型</button>
+  <div class="sb-list" id="sbList"></div>
+</aside>
+
+<header>
+  <b>模型验收</b>
+  <span class="hint">把 .glb / .fbx 拖进来，或者选文件：</span>
+  <input type="file" id="pick" accept=".glb,.gltf,.fbx">
+  <!-- FBX 转换器：两种各有毛病，让使用者自己挑（只影响 .fbx，GLB 不受影响） -->
+  <select id="转换器" title="FBX 用哪个转换器（GLB 不受影响）"
+          style="margin-left:10px;padding:3px 6px;border-radius:6px;border:1px solid #d9cfc0;background:#fff;font-size:12.5px">
+    <option value="auto">FBX: 自动</option>
+    <option value="assimp">FBX: Assimp（骨架准）</option>
+    <option value="three">FBX: three（材质准）</option>
+  </select>
+</header>
+
+<main>
+  <div id="drop">
+    <b>拖 .glb / .fbx 到这里</b>
+    松手就加载（也可以点上面「选择文件」）
+  </div>
+
+  <div class="panel">
+    <div><div class="k">三角面</div><div class="v" id="iTri">—</div></div>
+    <div><div class="k">顶点</div><div class="v" id="iVtx">—</div></div>
+    <div><div class="k">文件</div><div class="v" id="iName" style="font-size:13px">—</div></div>
+  </div>
+
+  <p class="hint" style="color:#9c938a;font-size:12.5px;margin:0">
+    将来要加的（都挂这个面板 / 这块地方）：显示布线 · 法线可视化 · UV 检查 ·
+    材质通道单独看 · LOD 对比 …
+  </p>
+</main>
+
+<!-- 🆕 弹层的 DOM 和样式这个单元**自带**（viewer.js 里），
+     宿主不用摆 —— 阿聪 2026-10-04：「随便一个 model 单独拿出来都能用」。
+     原来这里手写了一份，现在删掉，正好验证"自己建得起来" -->
+
+</div>
+
+<!-- three.js 走**本地 vendor**，不碰网络（断网 / 系统代理挂了照样能预览）。
+     ⚠️ 必须排在后面那些 `<script type="module">` **之前** —— 它是个**经典脚本**，
+     运行时给每个模块建 blob: URL 并**注入 importmap**，而 importmap 只在
+     "还没有任何 module 被解析"时才注册得上。
+     为什么不用相对路径的 module：`file://` 下外链 ES module 会被 CORS 挡，**静默失败**。
+     内容由 scripts/build.py 从 modules/glbview/vendor/three.vendor.js 内联进来
+     （那个文件是 scripts/fetch_three.py 生成的）；详见 three.vendor.js 顶部说明。 -->
+<script src="vendor/three.vendor.js?v=1681c2b7"></script>
+
+<script type="module" src="viewer.js?v=6e071219"></script>
+<!-- FBX → GLB：美术导出的多是 .fbx，转一道再喂上面的预览 -->
+<script src="assimp/assimpjs.js"></script>
+<script type="module" src="fbx2glb.js"></script>
+
+<script>
+/* 调试台自己的那点胶水：拖进来 → 喂给 viewer.js 的 pv3dOpen。
+   （这段是**这个页面特有**的，不属于渲染器，所以不放进 viewer.js。） */
+(function(){
+  var url = null;
+
+  /* ============ 缓存 + 左栏（照 网站/app.css 那套，见 ../../modules_debug/架构.md 2.9）============
+     阿聪 2026-10-05：「不是叫你所有 module 全都做吗」——
+     看模型这一格也留下"看过哪些"：模型本体进 IndexedDB，关掉浏览器再开还在。
+     ⚠️ 库名跟网站、跟别的单元分开（`glbview-tool`）。 */
+  var DB_NAME = 'glbview-tool', DB_STORE = 'models';
+  /* 转换器版本：FBX→GLB 从 three 的 FBXLoader 换成 assimpjs 之后，
+     旧条目里存的是旧转换器产的 GLB（骨架位置是错的）。
+     每条记录都记下当时的版本，对不上就提示重新拖 —— 跟缓存键要带代码版本是一个道理。 */
+  var 转换版本 = 'assimp-1';
+  /* 转换器选择（只影响 .fbx）：auto = Assimp 优先，失败退回 three */
+  var 选器 = document.getElementById('转换器');
+  if (选器){
+    选器.addEventListener('change', function(){
+      /* 存到独立全局上 —— 转换模块是异步加载的，直接写它的属性会被覆盖掉 */
+      window.__fbx偏好 = 选器.value;
+      document.getElementById('iName').textContent =
+        '转换器已切到 ' + 选器.options[选器.selectedIndex].text + '（重新拖一次 FBX 才生效）';
+    });
+  }
+  var META_KEY = 'glbview_tool_meta';
+  var dbConn = null, blobCache = {}, items = [], curId = '';
+
+  function db(cb){
+    if (dbConn) return cb(dbConn);
+    try{
+      var req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function(e){
+        var d = e.target.result;
+        if (!d.objectStoreNames.contains(DB_STORE)) d.createObjectStore(DB_STORE);
+      };
+      req.onsuccess = function(){ dbConn = req.result; cb(dbConn); };
+      req.onerror   = function(){ cb(null); };
+    }catch(e){ cb(null); }
+  }
+  function dbLoadAll(done){
+    db(function(d){
+      if (!d) return done();
+      try{
+        var c = d.transaction([DB_STORE], 'readonly').objectStore(DB_STORE).openCursor();
+        c.onsuccess = function(e){
+          var x = e.target.result;
+          if (x){ blobCache[x.key] = x.value; x.continue(); } else done();
+        };
+        c.onerror = function(){ done(); };
+      }catch(e){ done(); }
+    });
+  }
+  function putBlob(b){
+    var id = 'm' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+    blobCache[id] = b;
+    db(function(d){
+      if (!d) return;
+      try{ d.transaction([DB_STORE], 'readwrite').objectStore(DB_STORE).put(b, id); }catch(e){}
+    });
+    return id;
+  }
+  function saveMeta(){
+    try{ localStorage.setItem(META_KEY, JSON.stringify({ items: items, cur: curId })); }catch(e){}
+  }
+
+  function renderList(){
+    var box = document.getElementById('sbList');
+    box.innerHTML = '';
+    items.forEach(function(it){
+      var d = document.createElement('div');
+      d.className = 'sb-item' + (it.id === curId ? ' on' : '');
+      d.setAttribute('data-id', it.id);
+      d.title = it.name;
+      var dot = document.createElement('span'); dot.className = 'dot';
+      var nm = document.createElement('span'); nm.className = 'nm';
+      nm.textContent = it.name;
+      var rm = document.createElement('span'); rm.className = 'ren';
+      rm.setAttribute('data-del', it.id); rm.title = '从列表里去掉'; rm.textContent = '×';
+      d.appendChild(dot); d.appendChild(nm); d.appendChild(rm);
+      box.appendChild(d);
+    });
+    var pv = document.getElementById('sbPreview');
+    pv.innerHTML = '';
+    var cur = null;
+    for (var i = 0; i < items.length; i++) if (items[i].id === curId) cur = items[i];
+    if (cur){
+      var im = document.createElement('img');
+      im.src = URL.createObjectURL(blobCache[cur.id]);
+      pv.appendChild(im);
+    } else {
+      var e = document.createElement('div');
+      e.className = 'sb-empty';
+      e.textContent = '还没有看过的模型';
+      pv.appendChild(e);
+    }
+  }
+
+  function show(name, blobOrFile, id){
+    if (url) URL.revokeObjectURL(url);
+    url = URL.createObjectURL(blobOrFile);
+    document.getElementById('iName').textContent = name;
+    // viewer.js 会自己去数面数、给缩略图；数完它会把数字写进标题，这儿读一次就够
+    /* 这是**单元自己的调试页** —— 开关全放开：拖进来什么模型都能挨个试。
+       （网站/单元页上那两个「法线 / AO 效果」是按步骤灰的，这儿不拦。） */
+    /* 调试台是**这个单元自己的**页 —— 开关全放开（`poseMode` 也开着），
+       拖进来什么模型都能挨个试。
+       ⚠️ 网站/管线那几页是**按步骤**给的：`poseMode` 只有 4.1 之后才传，
+          所以那边看不到「姿态模式」这个入口。 */
+    /* ⚠️ 预览器是个 module，可能还没加载完就被叫到（FBX 那条路尤其快）。
+       等它注册好再开，不然就是"文件名字填上了、弹层没出来"。 */
+    (function 等预览器(第几次){
+      if (window.pv3dOpen){
+        window.pv3dOpen(url, name, [], name, { uvCheck: true, bakeMaps: true, poseMode: true });
+        return;
+      }
+      if (第几次 > 100){
+        document.getElementById('iName').textContent = '预览器没加载起来（viewer.js）';
+        return;
+      }
+      setTimeout(function(){ 等预览器(第几次 + 1); }, 100);
+    })(0);
+  }
+
+  /* 打开一个文件（拖进来 / 选文件都走这儿）—— 存进库，再进列表 */
+  function 是FBX(f){ return /\.fbx$/i.test((f && f.name) || ''); }
+
+  function load(file){
+    if (!file) return;
+
+    /* .fbx 先转成 .glb 再来 —— 预览器只认 glb/gltf，转换在浏览器里做 */
+    if (是FBX(file)){
+      document.getElementById('iName').textContent = '正在把 FBX 转成 GLB…（大模型要几秒）';
+      (function 等模块(第几次){
+        if (!window.fbxToGlb){
+          if (第几次 > 50){
+            document.getElementById('iName').textContent = '转换模块没加载起来（fbx2glb.js）';
+            return;
+          }
+          setTimeout(function(){ 等模块(第几次 + 1); }, 200);
+          return;
+        }
+        window.fbxToGlb(file).then(function(glb){
+          load(glb);
+        }).catch(function(e){
+          document.getElementById('iName').textContent = 'FBX 转换失败：' + (e && e.message || e);
+        });
+      })(0);
+      return;
+    }
+    var it = { id: putBlob(file), name: file.name || '（没名字）', ts: Date.now(), v: 转换版本 };
+    items.unshift(it);
+    curId = it.id;
+    saveMeta(); renderList(); show(it.name, file);
+  }
+
+  /* 从列表里点一条：把存着的 blob 拿出来重新加载 */
+  function openItem(id){
+    var it = null;
+    for (var i = 0; i < items.length; i++) if (items[i].id === id) it = items[i];
+    if (!it) return;
+    var b = blobCache[id];
+    if (!b) return;
+    curId = id; saveMeta(); renderList(); show(it.name, b);
+    /* 旧转换器产的条目：提示重新拖一次（它存的是旧的 GLB，骨架位置不对） */
+    var 名框 = document.getElementById('iName');
+    if (it.v !== 转换版本){
+      名框.textContent = (it.name || '模型') + '   ← 旧版转换结果，请重新拖一次源文件';
+      名框.style.color = '#c2410c';
+    } else {
+      名框.style.color = '';
+    }
+  }
+
+  document.getElementById('sbList').addEventListener('click', function(e){
+    var t = e.target;
+    var del = t.closest && t.closest('[data-del]');
+    if (del){
+      var id = del.getAttribute('data-del');
+      items = items.filter(function(x){ return x.id !== id; });
+      delete blobCache[id];
+      db(function(d){ try{ d.transaction([DB_STORE],'readwrite').objectStore(DB_STORE).delete(id); }catch(err){} });
+      if (curId === id) curId = items.length ? items[0].id : '';
+      saveMeta(); renderList();
+      if (curId) openItem(curId);
+      return;
+    }
+    var it = t.closest && t.closest('.sb-item');
+    if (it) openItem(it.getAttribute('data-id'));
+  });
+  document.getElementById('sbNew').addEventListener('click', function(){
+    document.getElementById('pick').click();
+  });
+  var drop = document.getElementById('drop');
+  drop.addEventListener('click', function(){ document.getElementById('pick').click(); });
+  document.getElementById('pick').addEventListener('change', function(e){ load(e.target.files[0]); });
+  ['dragenter','dragover'].forEach(function(ev){
+    drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.add('over'); });
+  });
+  ['dragleave','drop'].forEach(function(ev){
+    drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.remove('over'); });
+  });
+  drop.addEventListener('drop', function(e){
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    load(f);
+  });
+
+  /* 网址上带 ?model=<相对路径> 就自动加载 —— 蓝图里点卡片走这个口。
+     （浏览器读不了本地文件，所以模型要放在本站的 site/ 目录下，
+       用相对路径，比如 ?model=models/角色.glb）*/
+  function 从网址加载(){
+    var q = '';
+    try{ q = new URLSearchParams(location.search).get('model') || ''; }catch(e){}
+    if (!q) return;
+    var 名 = decodeURIComponent(q.split('?')[0].split('/').pop() || '模型.glb');
+    document.getElementById('iName').textContent = '正在加载 ' + 名 + ' …';
+    fetch(q).then(function(r){
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.blob();
+    }).then(function(b){
+      var f;
+      try{ f = new File([b], 名); }catch(e){ f = b; try{ f.name = 名; }catch(e2){} }
+      load(f);
+    }).catch(function(e){
+      document.getElementById('iName').textContent = '加载失败：' + e.message
+        + '（模型要放在 site/ 目录里）';
+    });
+  }
+
+  /* 启动：先读库，再画列表，最后把**上次看的那个**自动加载回来
+     ⚠️ 顺序不能反 —— 库还没读回来就渲染，会闪一下空状态 */
+  dbLoadAll(function(){
+    try{
+      var meta = JSON.parse(localStorage.getItem(META_KEY) || '{}');
+      if (meta.items && meta.items.length) items = meta.items;
+      curId = meta.cur || '';
+    }catch(e){}
+    items = items.filter(function(x){ return x && blobCache[x.id]; });   // 库里的 blob 真在才留
+    if (!curId || !blobCache[curId]) curId = items.length ? items[0].id : '';
+    renderList();
+    if (curId) openItem(curId);
+    saveMeta();
+    从网址加载();     // 网址里点了名的那个优先
+  });
+})();
+</script>
+</body>
+</html>
