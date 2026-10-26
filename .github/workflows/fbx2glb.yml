@@ -36,7 +36,13 @@ jobs:
           for f in inbox/*.fbx; do
             name=$(basename "$f"); name="${name%.*}"
             echo "=== $f -> models/$name.glb"
-            fbx2gltf --binary --input "$f" --output "models/$name" || echo "!! 转换失败：$f"
+            if fbx2gltf --binary --input "$f" --output "models/$name"; then
+              # 转成功就删源文件：仓库是公开的，源 FBX 留着只会越堆越大。
+              # 失败了留着，方便下次重跑。
+              rm -f "$f"
+            else
+              echo "!! 转换失败：$f（源文件保留）"
+            fi
           done
 
       - name: 生成模型清单
@@ -47,7 +53,7 @@ jobs:
         run: |
           git config user.name "model-review-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add models
+          git add -A models inbox
           if git diff --cached --quiet; then
             echo "没有变化"
           else

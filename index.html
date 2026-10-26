@@ -224,10 +224,7 @@
       var nm = document.createElement('span'); nm.className = 'nm';
       /* 名字后面标清楚这份是怎么来的 —— 同一个文件可能存了好几条，
          不标的话根本分不清哪条是网页转的、哪条是官方 SDK 转的 */
-      var 来源 = it.转换 === 'assimp' ? '（网页转·Assimp）'
-               : it.转换 === 'three'  ? '（网页转·three）'
-               : it.转换 === 'cloud'  ? '（云端·官方SDK）'
-               : '';
+      var 来源 = it.转换 === 'cloud' ? '（云端·官方SDK）' : '';
       nm.textContent = (it.name || '模型') + 来源;
       nm.title = 来源 || '直接拖进来的 GLB';
       var rm = document.createElement('span'); rm.className = 'ren';
