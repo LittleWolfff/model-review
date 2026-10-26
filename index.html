@@ -31,19 +31,9 @@
     background:#fffdfa; border-right:1px solid var(--hair);
     display:flex; flex-direction:column; padding:14px 12px; gap:12px;
   }
-  .sb-preview{
-    flex:none; height:150px; border:1px solid var(--hair); border-radius:12px;
-    background:linear-gradient(180deg,#fffdfa,#fbf6ef);
-    display:flex; align-items:center; justify-content:center; overflow:hidden;
+  .sb-title{
+    flex:none; font-size:12px; color:var(--dim); padding:0 2px;
   }
-  .sb-preview > img{ width:100%; height:100%; object-fit:contain; display:block; }
-  .sb-preview .sb-empty{ font-size:12px; color:var(--dim); text-align:center; padding:0 10px; line-height:1.5; }
-  .sb-new{
-    flex:none; width:100%; padding:9px 12px; border-radius:10px; cursor:pointer;
-    border:1px dashed var(--hair-strong); background:transparent;
-    color:#8a7b68; font:inherit; font-size:13px;
-  }
-  .sb-new:hover{ color:#8a4b1e; border-color:#f0c9a4; background:rgba(253,240,228,.5); }
   .sb-list{ flex:1; min-height:0; overflow-y:auto; }
   .sb-item{
     display:flex; align-items:center; gap:9px; padding:9px 11px; border-radius:9px;
@@ -107,17 +97,15 @@
 <!-- 左侧栏：这个单元**打开过的模型**（一条 = 一个看过的 glb）。
      点一条重新加载，× 从列表里去掉。模型本体存在 IndexedDB 里，关掉再开还在。 -->
 <aside id="sbSide">
-  <div class="sb-preview" id="sbPreview">
-    <div class="sb-empty">还没有看过的模型</div>
-  </div>
-  <button class="sb-new" id="sbNew">+ 打开模型</button>
+  <div class="sb-title">打开过的模型</div>
   <div class="sb-list" id="sbList"></div>
 </aside>
 
 <header>
   <b>模型验收</b>
-  <span class="hint">拖 .glb 进来直接看；拖 .fbx 会送云端用官方 SDK 转（约 1 分钟）：</span>
-  <input type="file" id="pick" accept=".glb,.gltf,.fbx">
+  <span class="hint">拖 .glb 进来直接看；拖 .fbx 会送云端用官方 SDK 转（约 1 分钟）</span>
+  <!-- 打开方式只留中间那个大拖放区；这里藏一个文件选择器给「点一下」用 -->
+  <input type="file" id="pick" accept=".glb,.gltf,.fbx" hidden>
 </header>
 
 <main>
@@ -232,26 +220,9 @@
       d.appendChild(dot); d.appendChild(nm); d.appendChild(rm);
       box.appendChild(d);
     });
-    var pv = document.getElementById('sbPreview');
-    pv.innerHTML = '';
-    var cur = null;
-    for (var i = 0; i < items.length; i++) if (items[i].id === curId) cur = items[i];
-    if (cur){
-      var im = document.createElement('img');
-      im.src = URL.createObjectURL(blobCache[cur.id]);
-      pv.appendChild(im);
-    } else {
-      var e = document.createElement('div');
-      e.className = 'sb-empty';
-      e.textContent = '还没有看过的模型';
-      pv.appendChild(e);
-    }
   }
 
-  /* ===== 仓库里的模型（云端 Actions 用官方 FBX SDK 转好的）=====
-     为什么有这一块：浏览器里那两个转换器都只实现 FBX 的一部分，美术导出的文件
-     经常骨架错位 / 小部件飞天。云端用 FBX2glTF（官方 SDK，和 UE/Maya 同一套）转，
-     结果就是对的 —— 所以让美术把 .fbx 传进仓库的 inbox/，这里直接列出来。 */
+  /* ===== 云端转好之后下载（官方 FBX SDK 的产物）===== */
   function 载入远程(名, 第几次){
     第几次 = 第几次 || 0;
     var 框 = document.getElementById('iName');
@@ -411,9 +382,6 @@
     }
     var it = t.closest && t.closest('.sb-item');
     if (it) openItem(it.getAttribute('data-id'));
-  });
-  document.getElementById('sbNew').addEventListener('click', function(){
-    document.getElementById('pick').click();
   });
   var drop = document.getElementById('drop');
   drop.addEventListener('click', function(){ document.getElementById('pick').click(); });
