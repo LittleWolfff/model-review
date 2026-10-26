@@ -452,8 +452,9 @@
     }catch(e){}
     items = items.filter(function(x){ return x && blobCache[x.id]; });   // 库里的 blob 真在才留
     if (!curId || !blobCache[curId]) curId = items.length ? items[0].id : '';
+    /* 🔴 不再自动打开上次那条（2026-10-27 改）：列表里可能躺着旧转换器产的坏结果，
+       一打开页面就自动加载它，看着像"怎么又不对"。现在启动是空的，由使用者自己点。 */
     renderList();
-    if (curId) openItem(curId);
     saveMeta();
     从网址加载();     // 网址里点了名的那个优先
     列仓库模型();     // 云端转好的那份（models/index.json）
