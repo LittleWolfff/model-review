@@ -924,6 +924,9 @@ var animModeOn = false;
 /* A-Pose（绑定姿势）开关：开着 = 骨架停在 bind pose，动画不覆盖。
    跟 `pv3dAnimOn` 互斥 —— 点播放会自动退出 A-Pose。 */
 var pv3dRestMode = false;
+/* 加载模型时记下每根骨的 local 变换，A-Pose 就照这个还原。
+   比 `Skeleton.pose()` 稳：那份按 `boneInverses` 反推，碰上 FBX2glTF 的产出会把模型炸开。 */
+var pv3dRestSnapshot = [];
 var pv3dAnimSpeed = 1;   // 播放速度（倍速）—— 0.5 / 1 / 2，见 `pv3dAnimctl` 那块浮层。
                          // ⚠️ **不跟着模型重置**：选过 2× 就一直 2×（换个模型也保持）。
 var pv3dClipN = 0;       // 这个模型带几段动作（0 = 没有）
@@ -2722,6 +2725,20 @@ window.pv3dOpen = function(url, name, srcUrls, realName, opts){
       pv3dSyncPoseUI();
       var _clips = (g && g.animations) || [];
       pv3dClipN = _clips.length;
+      /* 趁动画还没开始摆，把每根骨的 local 变换记下来 —— A-Pose 就是原样restore。
+         ⚠️ 别用 `Skeleton.pose()`：它按 `boneInverses` 反推，这份 FBX2glTF 的产出
+            会整片炸开（顶点全塌回原点，模型变成几片三角）。 */
+      pv3dRestSnapshot = [];
+      obj.traverse(function(o){
+        if (o.isBone){
+          pv3dRestSnapshot.push({
+            b: o,
+            p: o.position.clone(),
+            q: o.quaternion.clone(),
+            s: o.scale.clone(),
+          });
+        }
+      });
       if (_clips.length && _abtn){
         pv3dMixer = new THREE.AnimationMixer(obj);
         pv3dClips = _clips;
@@ -3797,12 +3814,15 @@ if (pv3dRestBtn) pv3dRestBtn.addEventListener('click', function(){
     if (pv3dMixer) pv3dMixer.timeScale = 0;
     var ab = document.getElementById('pv3dAnim');
     if (ab){ ab.classList.remove('on'); ab.innerHTML = '&#9654; 播放'; }
-    var n = 0;
-    pv3dObj.traverse(function(o){
-      if (o.isSkinnedMesh && o.skeleton){ o.skeleton.pose(); n++; }
-    });
+    /* 把骨骼逐根还原成加载时的姿势（见 `pv3dRestSnapshot` 那段注释） */
+    for (var i = 0; i < pv3dRestSnapshot.length; i++){
+      var r = pv3dRestSnapshot[i];
+      r.b.position.copy(r.p);
+      r.b.quaternion.copy(r.q);
+      r.b.scale.copy(r.s);
+    }
     var tip = document.getElementById('pv3dTip');
-    if (tip) tip.textContent = '已回到绑定姿势（' + n + ' 个蒙皮网格）—— 再点一次或点播放退出';
+    if (tip) tip.textContent = '已回到初始姿势（' + pv3dRestSnapshot.length + ' 根骨）—— 再点一次或点播放退出';
   } else {
     var tip2 = document.getElementById('pv3dTip');
     if (tip2) tip2.textContent = '已退出绑定姿势';
