@@ -112,29 +112,20 @@
   </div>
   <button class="sb-new" id="sbNew">+ 打开模型</button>
   <div class="sb-list" id="sbList"></div>
-  <!-- 仓库里的模型：云端 Actions 用官方 FBX SDK 转好的 GLB（models/index.json） -->
-  <div style="margin:14px 0 6px;font-size:12px;color:#9c938a">仓库里的模型（云端转好）</div>
-  <div class="sb-list" id="仓库列表"></div>
 </aside>
 
 <header>
   <b>模型验收</b>
-  <span class="hint">把 .glb / .fbx 拖进来，或者选文件：</span>
+  <span class="hint">拖 .glb 进来直接看；拖 .fbx 会送云端用官方 SDK 转（约 1 分钟）：</span>
   <input type="file" id="pick" accept=".glb,.gltf,.fbx">
-  <!-- FBX 转换器：两种各有毛病，让使用者自己挑（只影响 .fbx，GLB 不受影响） -->
-  <select id="转换器" title="FBX 用哪个转换器（GLB 不受影响）"
-          style="margin-left:10px;padding:3px 6px;border-radius:6px;border:1px solid #d9cfc0;background:#fff;font-size:12.5px">
-    <option value="auto">FBX: 自动</option>
-    <option value="assimp">FBX: Assimp（骨架准）</option>
-    <option value="three">FBX: three（材质准）</option>
-  </select>
 </header>
 
 <main>
   <div id="drop">
     <b>拖 .glb / .fbx 到这里</b>
-    松手就加载（也可以点上面「选择文件」）
+    GLB 立刻打开；FBX 会上传云端转换，约 1 分钟后自动打开
   </div>
+
 
   <div class="panel">
     <div><div class="k">三角面</div><div class="v" id="iTri">—</div></div>
@@ -164,9 +155,6 @@
 <script src="vendor/three.vendor.js?v=1681c2b7"></script>
 
 <script type="module" src="viewer.js?v=6e071219"></script>
-<!-- FBX → GLB：美术导出的多是 .fbx，转一道再喂上面的预览 -->
-<script src="assimp/assimpjs.js"></script>
-<script type="module" src="fbx2glb.js"></script>
 
 <script>
 /* 调试台自己的那点胶水：拖进来 → 喂给 viewer.js 的 pv3dOpen。
@@ -179,20 +167,10 @@
      看模型这一格也留下"看过哪些"：模型本体进 IndexedDB，关掉浏览器再开还在。
      ⚠️ 库名跟网站、跟别的单元分开（`glbview-tool`）。 */
   var DB_NAME = 'glbview-tool', DB_STORE = 'models';
-  /* 转换器版本：FBX→GLB 从 three 的 FBXLoader 换成 assimpjs 之后，
-     旧条目里存的是旧转换器产的 GLB（骨架位置是错的）。
-     每条记录都记下当时的版本，对不上就提示重新拖 —— 跟缓存键要带代码版本是一个道理。 */
-  var 转换版本 = 'assimp-1';
-  /* 转换器选择（只影响 .fbx）：auto = Assimp 优先，失败退回 three */
-  var 选器 = document.getElementById('转换器');
-  if (选器){
-    选器.addEventListener('change', function(){
-      /* 存到独立全局上 —— 转换模块是异步加载的，直接写它的属性会被覆盖掉 */
-      window.__fbx偏好 = 选器.value;
-      document.getElementById('iName').textContent =
-        '转换器已切到 ' + 选器.options[选器.selectedIndex].text + '（重新拖一次 FBX 才生效）';
-    });
-  }
+  /* 缓存版本：FBX 统一走云端（官方 SDK）之后，以前存在库里的「网页转换」结果
+     不再可信（骨架/小部件位置可能不对）。每条记录带版本，对不上就提示重新拖。
+     —— 跟缓存键要带代码版本是一个道理。 */
+  var 转换版本 = 'cloud-1';
   var META_KEY = 'glbview_tool_meta';
   var dbConn = null, blobCache = {}, items = [], curId = '';
 
@@ -248,6 +226,7 @@
          不标的话根本分不清哪条是网页转的、哪条是官方 SDK 转的 */
       var 来源 = it.转换 === 'assimp' ? '（网页转·Assimp）'
                : it.转换 === 'three'  ? '（网页转·three）'
+               : it.转换 === 'cloud'  ? '（云端·官方SDK）'
                : '';
       nm.textContent = (it.name || '模型') + 来源;
       nm.title = 来源 || '直接拖进来的 GLB';
@@ -276,40 +255,32 @@
      为什么有这一块：浏览器里那两个转换器都只实现 FBX 的一部分，美术导出的文件
      经常骨架错位 / 小部件飞天。云端用 FBX2glTF（官方 SDK，和 UE/Maya 同一套）转，
      结果就是对的 —— 所以让美术把 .fbx 传进仓库的 inbox/，这里直接列出来。 */
-  function 载入远程(名){
-    document.getElementById('iName').textContent = '正在下载 ' + 名 + ' …';
-    fetch('models/' + encodeURIComponent(名), {cache: 'no-cache'}).then(function(r){
+  function 载入远程(名, 第几次){
+    第几次 = 第几次 || 0;
+    var 框 = document.getElementById('iName');
+    /* Actions 提交后 Pages 还要几十秒才上线：先试本站，几次不行再退回原站 raw（raw 是实时的） */
+    var 源 = 第几次 < 3
+      ? 'models/' + encodeURIComponent(名)
+      : 'https://raw.githubusercontent.com/LittleWolfff/model-review/main/models/' + encodeURIComponent(名);
+    框.textContent = '正在下载 ' + 名 + ' …';
+    框.style.color = '';
+    fetch(源, {cache: 'no-cache'}).then(function(r){
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.blob();
     }).then(function(b){
       var f;
       try{ f = new File([b], 名); }catch(e){ f = b; try{ f.name = 名; }catch(e2){} }
-      load(f);
+      load(f, 'cloud');
     }).catch(function(e){
-      document.getElementById('iName').textContent = '下载失败：' + e.message;
+      if (第几次 < 5){
+        框.textContent = '等网页部署…（' + (第几次 + 1) + '/6）';
+        setTimeout(function(){ 载入远程(名, 第几次 + 1); }, 5000);
+        return;
+      }
+      框.textContent = '下载失败：' + e.message;
+      框.style.color = '#c2410c';
     });
   }
-  function 列仓库模型(){
-    fetch('models/index.json', {cache: 'no-cache'}).then(function(r){
-      return r.ok ? r.json() : [];
-    }).then(function(列表){
-      var 盒 = document.getElementById('仓库列表');
-      if (!盒) return;
-      盒.innerHTML = '';
-      (列表 || []).forEach(function(it){
-        var d = document.createElement('div');
-        d.className = 'sb-item';
-        var dot = document.createElement('span'); dot.className = 'dot';
-        var nm = document.createElement('span'); nm.className = 'nm';
-        nm.textContent = it.name;
-        d.appendChild(dot); d.appendChild(nm);
-        d.title = '点开加载（' + Math.max(1, Math.round((it.size || 0) / 1024)) + ' KB）';
-        d.addEventListener('click', function(){ 载入远程(it.name); });
-        盒.appendChild(d);
-      });
-    }).catch(function(){});
-  }
-
   function show(name, blobOrFile, id){
     if (url) URL.revokeObjectURL(url);
     url = URL.createObjectURL(blobOrFile);
@@ -339,31 +310,67 @@
   /* 打开一个文件（拖进来 / 选文件都走这儿）—— 存进库，再进列表 */
   function 是FBX(f){ return /\.fbx$/i.test((f && f.name) || ''); }
 
-  function load(file){
-    if (!file) return;
+  /* ===== 云端转（官方 FBX SDK）=====
+     网页 → 中转服务（Cloudflare **Pages Functions**）→ GitHub Actions 跑 FBX2glTF → models/*.glb
+     浏览器里的转换库都只实现了一部分 FBX（骨架缩在脚边 / 眼珠飞到头外），
+     所以拖进来的 .fbx 一律送云端用官方 SDK 转。
+     ⚠️ 这样绕是因为：令牌不能放进网页；Autodesk 也不许把 SDK 编成 wasm 发到浏览器。
+     ⚠️ 为什么是 pages.dev 不是 workers.dev：workers.dev 在国内被 SNI 阻断，
+        **不开梯子连不上**；pages.dev 国内能直连。美术只用浏览器，不能要求他们挂代理。 */
+  var 中转 = 'https://model-review-upload.pages.dev';
 
-    /* .fbx 先转成 .glb 再来 —— 预览器只认 glb/gltf，转换在浏览器里做 */
-    if (是FBX(file)){
-      document.getElementById('iName').textContent = '正在把 FBX 转成 GLB…（大模型要几秒）';
-      (function 等模块(第几次){
-        if (!window.fbxToGlb){
-          if (第几次 > 50){
-            document.getElementById('iName').textContent = '转换模块没加载起来（fbx2glb.js）';
-            return;
-          }
-          setTimeout(function(){ 等模块(第几次 + 1); }, 200);
+  function 云端转(file){
+    var 框 = document.getElementById('iName');
+    var 原名 = file.name || 'model.fbx';
+    框.style.color = '';
+    框.textContent = '① 上传中…（' + 原名 + '）';
+    fetch(中转 + '/upload?name=' + encodeURIComponent(原名), { method: 'POST', body: file })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (!d || !d.ok) throw new Error((d && d.error) || '上传失败');
+        框.textContent = '② 已传上去，云端用官方 SDK 转…（约 1 分钟，别关页面）';
+        轮询转换(d.name, 0);
+      })
+      .catch(function(e){
+        框.textContent = '上传失败：' + e.message + '（浏览器要能连上中转服务）';
+        框.style.color = '#c2410c';
+      });
+  }
+
+  function 轮询转换(名, 次){
+    var 框 = document.getElementById('iName');
+    if (次 >= 12){
+      框.textContent = '等太久了，云端可能还在转。过一会儿刷新页面再拖一次。';
+      框.style.color = '#c2410c';
+      return;
+    }
+    fetch(中转 + '/status?name=' + encodeURIComponent(名), { cache: 'no-store' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d && d.ready){
+          框.textContent = '③ 转好了，正在下载…';
+          载入远程(名 + '.glb', 0);
           return;
         }
-        window.fbxToGlb(file).then(function(glb){
-          load(glb);
-        }).catch(function(e){
-          document.getElementById('iName').textContent = 'FBX 转换失败：' + (e && e.message || e);
-        });
-      })(0);
+        框.textContent = '② 云端转中… 已等 ' + (次 * 5) + ' 秒';
+        setTimeout(function(){ 轮询转换(名, 次 + 1); }, 5000);
+      })
+      .catch(function(e){
+        框.textContent = '查状态失败：' + e.message;
+        框.style.color = '#c2410c';
+      });
+  }
+
+  function load(file, 来源){
+    if (!file) return;
+
+    /* .fbx 一律送云端转（浏览器里那两个库都转不准） */
+    if (是FBX(file)){
+      云端转(file);
       return;
     }
     var it = { id: putBlob(file), name: file.name || '（没名字）', ts: Date.now(), v: 转换版本,
-               转换: (window.fbxToGlb && window.fbxToGlb.方式) || '' };
+               转换: 来源 || '' };
     items.unshift(it);
     curId = it.id;
     saveMeta(); renderList(); show(it.name, file);
@@ -457,7 +464,6 @@
     renderList();
     saveMeta();
     从网址加载();     // 网址里点了名的那个优先
-    列仓库模型();     // 云端转好的那份（models/index.json）
   });
 })();
 </script>
