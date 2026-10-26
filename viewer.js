@@ -837,9 +837,6 @@ var PV3D_HTML = '<div class="pv3d-box">' +
          ⚠️ 按钮用的就是 `.pv3d-posebtn` **同一套样式**，没自造控件。 */
       '<div class="pv3d-animctl" id="pv3dAnimctl" hidden>' +
         '<div class="pv3d-posebtns">' +
-          /* 🧍 A-Pose：把骨架摆回绑定姿势（美术导出时摆的那个 A 字 / T 字），
-             方便看原始体型。点播放会自动退出。 */
-          '<button class="pv3d-posebtn" id="pv3dRestPose" title="骨架回到绑定姿势（美术导出时摆的 A 字 / T 字）">A-Pose</button>' +
           '<button class="pv3d-posebtn" id="pv3dAnim">&#9654; 播放</button>' +
           '<button class="pv3d-posebtn pv3d-spd" data-s="0.5">0.5&times;</button>' +
           '<button class="pv3d-posebtn pv3d-spd on" data-s="1">1&times;</button>' +
@@ -921,12 +918,10 @@ var pv3dAnimOn = false;
       这个是"**进没进动画模式**"。两个独立：进了模式可以停着，退出去就收摊。
    ⚠️ 退出模式时**顺手停播**（跟姿态模式退出会还原姿势是一个道理）。 */
 var animModeOn = false;
-/* A-Pose（绑定姿势）开关：开着 = 骨架停在 bind pose，动画不覆盖。
-   跟 `pv3dAnimOn` 互斥 —— 点播放会自动退出 A-Pose。 */
+/* 打开模型时**先不套动画**：true = 渲染循环跳过 `mixer.update()`，
+   骨架停在模型自带的姿势上。点「播放」才置 false、让动画接管。
+   （别把它跟 `pv3dAnimOn` 搞混：那个是"正在播 / 暂停"。） */
 var pv3dRestMode = false;
-/* 加载模型时记下每根骨的 local 变换，A-Pose 就照这个还原。
-   比 `Skeleton.pose()` 稳：那份按 `boneInverses` 反推，碰上 FBX2glTF 的产出会把模型炸开。 */
-var pv3dRestSnapshot = [];
 var pv3dAnimSpeed = 1;   // 播放速度（倍速）—— 0.5 / 1 / 2，见 `pv3dAnimctl` 那块浮层。
                          // ⚠️ **不跟着模型重置**：选过 2× 就一直 2×（换个模型也保持）。
 var pv3dClipN = 0;       // 这个模型带几段动作（0 = 没有）
@@ -2706,9 +2701,7 @@ window.pv3dOpen = function(url, name, srcUrls, realName, opts){
             那样每点一次都会**从头开始**，看着像"卡了一下"。 */
       animModeOn = false;          // 退出动画模式（连带把浮层收起来，见下面的 sync）
       pv3dAnimOn = false;
-      pv3dRestMode = false;        // 换模型（或重开）→ A-Pose 状态归零
-      var _rb0 = document.getElementById('pv3dRestPose');
-      if (_rb0) _rb0.classList.remove('on');
+      pv3dRestMode = false;        // 换模型（或重开）→ 先不清场，下面有动作才置 true
       pv3dClipN = 0;
       pv3dClips = [];
       pv3dClipIdx = 0;
@@ -2725,31 +2718,15 @@ window.pv3dOpen = function(url, name, srcUrls, realName, opts){
       pv3dSyncPoseUI();
       var _clips = (g && g.animations) || [];
       pv3dClipN = _clips.length;
-      /* 趁动画还没开始摆，把每根骨的 local 变换记下来 —— A-Pose 就是原样restore。
-         ⚠️ 别用 `Skeleton.pose()`：它按 `boneInverses` 反推，这份 FBX2glTF 的产出
-            会整片炸开（顶点全塌回原点，模型变成几片三角）。 */
-      pv3dRestSnapshot = [];
-      obj.traverse(function(o){
-        if (o.isBone){
-          pv3dRestSnapshot.push({
-            b: o,
-            p: o.position.clone(),
-            q: o.quaternion.clone(),
-            s: o.scale.clone(),
-          });
-        }
-      });
       if (_clips.length && _abtn){
         pv3dMixer = new THREE.AnimationMixer(obj);
         pv3dClips = _clips;
         pv3dClipIdx = 0;
         pv3dMixer.clipAction(_clips[0]).play();
         pv3dMixer.timeScale = 0;                 // 先停着，点了才播
-        /* 打开就是静止的初始姿势（A-Pose）—— 不进动画、不套动画第 0 帧。
+        /* 打开就是静止姿势（模型自带的那个）—— 不套动画第 0 帧。
            要看动起来，进动画模式点「播放」。 */
         pv3dRestMode = true;
-        var _rbStart = document.getElementById('pv3dRestPose');
-        if (_rbStart) _rbStart.classList.add('on');
         _abtn.title = '这个模型带了 ' + _clips.length + ' 段动作（'
                     + (_clips[0].name || '未命名') + '，'
                     + _clips[0].duration.toFixed(2) + ' 秒）—— 点一下播 / 再点停';
@@ -3752,12 +3729,6 @@ if (pv3dPoseBtn) pv3dPoseBtn.addEventListener('click', function(){
 var pv3dAnimModeBtn = document.getElementById('pv3dAnimMode');
 if (pv3dAnimModeBtn) pv3dAnimModeBtn.addEventListener('click', function(){
   animModeOn = !animModeOn;
-  /* 退出动画模式 → A-Pose 也一起收（不然骨架会一直停在绑定姿势） */
-  if (!animModeOn && pv3dRestMode){
-    pv3dRestMode = false;
-    var _rb = document.getElementById('pv3dRestPose');
-    if (_rb) _rb.classList.remove('on');
-  }
   if (!animModeOn && pv3dAnimOn && pv3dMixer){
     pv3dAnimOn = false;
     pv3dMixer.timeScale = 0;
@@ -3806,43 +3777,10 @@ if (pv3dPosectl){
   });
 }
 
-/* 🧍 A-Pose —— 骨架回到绑定姿势。
-   `Skeleton.pose()` 就是干这个的：按 `boneInverses` 把每根骨还原成 bind pose。
-   ⚠️ 必须同时打开 `pv3dRestMode`，让渲染循环跳过 `mixer.update()` ——
-      不然动画每帧都会把刚恢复的骨架重新摆走。 */
-var pv3dRestBtn = document.getElementById('pv3dRestPose');
-if (pv3dRestBtn) pv3dRestBtn.addEventListener('click', function(){
-  if (!pv3dObj) return;
-  pv3dRestMode = !pv3dRestMode;
-  if (pv3dRestMode){
-    pv3dAnimOn = false;
-    if (pv3dMixer) pv3dMixer.timeScale = 0;
-    var ab = document.getElementById('pv3dAnim');
-    if (ab){ ab.classList.remove('on'); ab.innerHTML = '&#9654; 播放'; }
-    /* 把骨骼逐根还原成加载时的姿势（见 `pv3dRestSnapshot` 那段注释） */
-    for (var i = 0; i < pv3dRestSnapshot.length; i++){
-      var r = pv3dRestSnapshot[i];
-      r.b.position.copy(r.p);
-      r.b.quaternion.copy(r.q);
-      r.b.scale.copy(r.s);
-    }
-    var tip = document.getElementById('pv3dTip');
-    if (tip) tip.textContent = '已回到初始姿势（' + pv3dRestSnapshot.length + ' 根骨）—— 再点一次或点播放退出';
-  } else {
-    var tip2 = document.getElementById('pv3dTip');
-    if (tip2) tip2.textContent = '已退出绑定姿势';
-  }
-  this.classList.toggle('on', pv3dRestMode);
-});
-
 if (pv3dAnimBtn) pv3dAnimBtn.addEventListener('click', function(){
   if (!pv3dMixer) return;
-  /* 点播放 = 退出 A-Pose，让动画重新接管骨架 */
-  if (pv3dAnimOn === false && pv3dRestMode){
-    pv3dRestMode = false;
-    var rb = document.getElementById('pv3dRestPose');
-    if (rb) rb.classList.remove('on');
-  }
+  /* 点播放 = 让动画接管骨架（打开时 `pv3dRestMode` 是 true，跳过 mixer） */
+  pv3dRestMode = false;
   pv3dAnimOn = !pv3dAnimOn;
   pv3dMixer.timeScale = pv3dAnimOn ? pv3dAnimSpeed : 0;   // 速度由旁边的挡位管
   this.classList.toggle('on', pv3dAnimOn);                // 亮 = 正在播
