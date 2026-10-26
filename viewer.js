@@ -2745,6 +2745,11 @@ window.pv3dOpen = function(url, name, srcUrls, realName, opts){
         pv3dClipIdx = 0;
         pv3dMixer.clipAction(_clips[0]).play();
         pv3dMixer.timeScale = 0;                 // 先停着，点了才播
+        /* 打开就是静止的初始姿势（A-Pose）—— 不进动画、不套动画第 0 帧。
+           要看动起来，进动画模式点「播放」。 */
+        pv3dRestMode = true;
+        var _rbStart = document.getElementById('pv3dRestPose');
+        if (_rbStart) _rbStart.classList.add('on');
         _abtn.title = '这个模型带了 ' + _clips.length + ' 段动作（'
                     + (_clips[0].name || '未命名') + '，'
                     + _clips[0].duration.toFixed(2) + ' 秒）—— 点一下播 / 再点停';
