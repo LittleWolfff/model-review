@@ -549,26 +549,6 @@ var pv3d验收规则 = [
         { 数量: 材质们.length, 名字: 名清单, 占位贴图: 占位 });
     },
   },
-  {
-    id: '异物',
-    名称: '多余物体',
-    手动: '点「白模」或「显示布线」，看有没有藏在身体里的方块/球；再看「模型信息」原始 JSON 的 nodes 名称有没有 Cube/Sphere/Plane。',
-    检查: function(){
-      var 疑点 = [], 网格名 = [];
-      pv3dObj.traverse(function(o){
-        if (!o.isMesh) return;
-        网格名.push(o.name || '(无名)');
-        var n = (o.name || '').toLowerCase();
-        if (/^(cube|sphere|plane|cylinder|icosphere|empty)/.test(n)) 疑点.push(o.name);
-      });
-      var 根数 = pv3dObj.children.filter(function(c){ return c && c.isObject3D; }).length;
-      if (根数 > 1) 疑点.push('多个根节点（' + 根数 + '）');
-      var 通过 = 疑点.length === 0;
-      return pv3d规则结果(通过,
-        通过 ? '没有明显多余物体（网格 ' + 网格名.length + ' 个）' : '可疑：' + 疑点.join('、'),
-        { 疑点: 疑点, 网格: 网格名 });
-    },
-  },
 ];
 
 window.pv3d验收规则 = pv3d验收规则;

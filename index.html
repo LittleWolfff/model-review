@@ -200,7 +200,7 @@
      （那个文件是 scripts/fetch_three.py 生成的）；详见 three.vendor.js 顶部说明。 -->
 <script src="vendor/three.vendor.js?v=1681c2b7"></script>
 
-<script type="module" src="viewer.js?v=20261104i"></script>
+<script type="module" src="viewer.js?v=20261105a"></script>
 
 <script>
 /* 调试台自己的那点胶水：拖进来 → 喂给 viewer.js 的 pv3dOpen。
@@ -607,7 +607,7 @@
          后面按管线往下排。规则数组本身的顺序不动，这里只排显示/执行顺序。 */
       var 顺序 = [
         '原点在脚底', '模型缩放', '人物高度/单位换算',
-        'root 角度', '骨骼名/数量', '材质槽', '多余物体',
+        'root 角度', '骨骼名/数量', '材质槽',
       ];
       规则们 = 规则们.slice().sort(function(a, b){
         var ia = 顺序.indexOf(a.名称), ib = 顺序.indexOf(b.名称);
