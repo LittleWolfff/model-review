@@ -22,6 +22,11 @@
     --accent:#e8925a; --hair:#ece2d5; --hair-strong:#e0d3c2;
   }
   *{ box-sizing:border-box; }
+  /* 文件选择框：不能写 hidden（display:none），Chrome 有时会拒绝弹框。
+     移出屏幕但保持渲染，点的还是它。 */
+  .pick-hidden{
+    position:absolute; left:-9999px; top:0; width:1px; height:1px; opacity:0;
+  }
 
   /* ---------- 左侧栏：打开过的模型（照抄 网站/app.css 那份，这个单元自带样式） ----------
      阿聪 2026-10-05：「不是叫你所有 module 全都做吗」—— 看模型这一格也留个"看过哪些"，
@@ -34,6 +39,16 @@
   .sb-title{
     flex:none; font-size:12px; color:var(--dim); padding:0 2px;
   }
+  .sb-new{
+    display:block; flex:none; font:inherit; font-size:13px; font-weight:600; padding:9px 11px;
+    border-radius:9px; border:1px solid #f0c9a4; background:#fdf0e4; color:#8a4b1e;
+    cursor:pointer; text-align:left;
+  }
+  .sb-tip{
+    flex:none; min-height:18px; font-size:12px; line-height:1.5;
+    color:var(--dim); padding:0 2px;
+  }
+  .sb-new:hover{ border-color:var(--accent); }
   .sb-list{ flex:1; min-height:0; overflow-y:auto; }
   .sb-item{
     display:flex; align-items:center; gap:9px; padding:9px 11px; border-radius:9px;
@@ -81,9 +96,46 @@
     background:#fff; border:1px solid var(--hair); border-radius:14px;
     padding:14px 20px;
   }
+  .panel[hidden]{ display:none; }
   .panel .k{ font-size:12px; color:var(--dim); }
   .panel .v{ font-size:16px; font-weight:600; }
   .panel .v small{ font-size:12px; font-weight:400; color:var(--dim); }
+  /* 检查区：按钮 + 日志（绿=通过，红=不通过） */
+  .check{ background:#fff; border:1px solid var(--hair); border-radius:14px; padding:14px 20px; }
+  .check button{
+    font:inherit; font-size:14px; font-weight:600; padding:10px 18px;
+    border-radius:10px; border:1px solid #f0c9a4; background:#fdf0e4;
+    color:#8a4b1e; cursor:pointer;
+  }
+  .check button:hover{ border-color:var(--accent); }
+  .check-log{ margin-top:10px; font-size:13.5px; line-height:1.8; }
+  .check-log .ok{ color:#1b8a3a; }
+  .check-log .bad{ color:#c62828; }
+  .check-log .na{ color:#8a8a8a; }
+  /* 每条结果下面那行「手动验证办法」：灰一点、小一点、缩进 */
+  .check-log .手动{
+    color:#9c938a; font-size:12px; line-height:1.65;
+    margin:2px 0 8px 16px; font-weight:400;
+  }
+
+  /* 内嵌查看器：上传过模型后，直接在主区域显示，不再弹窗 */
+  .model-host{
+    position:relative; height:clamp(360px, 62vh, 660px); background:#fff;
+    border:1px solid var(--hair); border-radius:16px; overflow:hidden;
+  }
+  .model-host > #drop{
+    position:absolute; inset:0; margin:0; border:0; border-radius:0;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+  }
+  #pv3d.embedded{
+    position:absolute; inset:0; z-index:2; padding:0;
+    background:transparent; pointer-events:none;
+  }
+  #pv3d.embedded .pv3d-box{
+    width:100%; height:100%; max-width:none; max-height:none;
+    border-radius:0; box-shadow:none; pointer-events:auto;
+  }
+  #pv3d.embedded #pv3dClose{ display:none; }
 
   /* ===== 下面是 viewer.js 要的弹层 DOM 用的样式（跟网站里那套一致）===== */
   /* 「显示布线」开着的样子（跟网站那边用同一个 class，别各写一套）*/
@@ -98,6 +150,8 @@
      点一条重新加载，× 从列表里去掉。模型本体存在 IndexedDB 里，关掉再开还在。 -->
 <aside id="sbSide">
   <div class="sb-title">打开过的模型</div>
+  <label class="sb-new" id="sbNew" for="pick">+ 打开模型</label>
+  <div class="sb-tip" id="操作提示"></div>
   <div class="sb-list" id="sbList"></div>
 </aside>
 
@@ -105,20 +159,28 @@
   <b>模型验收</b>
   <span class="hint">拖 .glb 进来直接看；拖 .fbx 会送云端用官方 SDK 转（约 1 分钟）</span>
   <!-- 打开方式只留中间那个大拖放区；这里藏一个文件选择器给「点一下」用 -->
-  <input type="file" id="pick" accept=".glb,.gltf,.fbx" hidden>
+  <input type="file" id="pick" accept=".glb,.gltf,.fbx" class="pick-hidden">
 </header>
 
 <main>
-  <div id="drop">
-    <b>拖 .glb / .fbx 到这里</b>
-    GLB 立刻打开；FBX 会上传云端转换，约 1 分钟后自动打开
+  <div class="model-host" id="modelHost">
+    <div id="drop">
+      <b>拖 .glb / .fbx 到这里</b>
+      GLB 立刻打开；FBX 会上传云端转换，约 1 分钟后自动打开
+    </div>
   </div>
 
 
-  <div class="panel">
+  <!-- 信息面板已隐藏：阿聪不要这一条。元素留着给脚本更新，别删。 -->
+  <div class="panel" hidden>
     <div><div class="k">三角面</div><div class="v" id="iTri">—</div></div>
     <div><div class="k">顶点</div><div class="v" id="iVtx">—</div></div>
     <div><div class="k">文件</div><div class="v" id="iName" style="font-size:13px">—</div></div>
+  </div>
+
+  <div class="check">
+    <button id="checkOrigin">检查原点在脚底</button>
+    <div class="check-log" id="checkLog"></div>
   </div>
 
 </main>
@@ -138,12 +200,35 @@
      （那个文件是 scripts/fetch_three.py 生成的）；详见 three.vendor.js 顶部说明。 -->
 <script src="vendor/three.vendor.js?v=1681c2b7"></script>
 
-<script type="module" src="viewer.js?v=5a984df8"></script>
+<script type="module" src="viewer.js?v=20261104i"></script>
 
 <script>
 /* 调试台自己的那点胶水：拖进来 → 喂给 viewer.js 的 pv3dOpen。
    （这段是**这个页面特有**的，不属于渲染器，所以不放进 viewer.js。） */
 (function(){
+  /* 页面日志：写到 inner/工具/界面日志.txt，排查时直接读文件。 */
+  /* 日志排队发：一次验收会连着写七八行，并发 POST 会丢行/乱序，
+     排成一条链就稳了。 */
+  var 日志队列 = Promise.resolve();
+  function 记日志(文本){
+    日志队列 = 日志队列.then(function(){
+      return fetch('/log', { method: 'POST', body: String(文本) }).catch(function(){});
+    });
+  }
+  /* 左栏那行小字：点了没、导到哪一步，都马上写出来（阿聪要的即时反馈）。 */
+  function 提示(文字, 颜色){
+    var 框 = document.getElementById('操作提示');
+    if (!框) return;
+    框.textContent = 文字 || '';
+    框.style.color = 颜色 || '';
+  }
+  window.addEventListener('error', function(e){
+    记日志('JS错误：' + (e.message || '') + ' @' + (e.filename || '') + ':' + (e.lineno || ''));
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    记日志('未处理异常：' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+  });
+
   var url = null;
 
   /* ============ 缓存 + 左栏（照 网站/app.css 那套，见 ../../modules_debug/架构.md 2.9）============
@@ -262,11 +347,22 @@
        等它注册好再开，不然就是"文件名字填上了、弹层没出来"。 */
     (function 等预览器(第几次){
       if (window.pv3dOpen){
+        var 壳 = document.getElementById('pv3d');
+        var 宿主 = document.getElementById('modelHost');
+        if (壳 && 宿主 && !宿主.contains(壳)){
+          壳.classList.add('embedded');
+          宿主.appendChild(壳);
+        }
+        var 拖放提示 = document.getElementById('drop');
+        if (拖放提示) 拖放提示.hidden = true;
         window.pv3dOpen(url, name, [], name, { uvCheck: true, bakeMaps: true, poseMode: true });
+        提示('已打开 ' + name);
+        setTimeout(function(){ window.dispatchEvent(new Event('resize')); }, 120);
         return;
       }
       if (第几次 > 100){
         document.getElementById('iName').textContent = '预览器没加载起来（viewer.js）';
+        提示('预览器没加载起来（viewer.js）', '#c2410c');
         return;
       }
       setTimeout(function(){ 等预览器(第几次 + 1); }, 100);
@@ -293,6 +389,7 @@
     var 唯一 = 原名.replace(/\.fbx$/i, '') + '__' + Date.now().toString(36);
     框.style.color = '';
     框.textContent = '① 上传中…（' + 原名 + '）';
+    提示('正在上传 ' + 原名 + ' …');
     fetch(中转 + '/upload?name=' + encodeURIComponent(唯一 + '.fbx'), { method: 'POST', body: file })
       .then(function(r){ return r.json(); })
       .then(function(d){
@@ -340,7 +437,22 @@
       云端转(file);
       return;
     }
-    var it = { id: putBlob(file), name: file.name || '（没名字）', ts: Date.now(), v: 转换版本,
+    var 名 = file.name || '（没名字）';
+    var 大小 = file.size || 0;
+    /* 同名同大小已经在列表里：复用那一条，不要每次刷新都新增 */
+    var 已有 = items.filter(function(x){ return x.name === 名 && (x.size || 0) === 大小; })[0];
+    if (已有){
+      blobCache[已有.id] = file;
+      db(function(d){
+        if (!d) return;
+        try{ d.transaction([DB_STORE], 'readwrite').objectStore(DB_STORE).put(file, 已有.id); }catch(e){}
+      });
+      已有.ts = Date.now();
+      curId = 已有.id;
+      saveMeta(); renderList(); show(已有.name, file);
+      return;
+    }
+    var it = { id: putBlob(file), name: 名, size: 大小, ts: Date.now(), v: 转换版本,
                转换: 来源 || '' };
     items.unshift(it);
     curId = it.id;
@@ -383,7 +495,12 @@
   });
   var drop = document.getElementById('drop');
   drop.addEventListener('click', function(){ document.getElementById('pick').click(); });
-  document.getElementById('pick').addEventListener('change', function(e){ load(e.target.files[0]); });
+  document.getElementById('pick').addEventListener('change', function(e){
+    var 文件 = e.target.files[0];
+    e.target.value = '';      // 清空：下次选同一个文件也会再触发 change
+    if (文件) 提示('正在导入 ' + 文件.name + ' …');
+    load(文件);
+  });
   ['dragenter','dragover'].forEach(function(ev){
     drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.add('over'); });
   });
@@ -392,6 +509,7 @@
   });
   drop.addEventListener('drop', function(e){
     var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) 提示('正在导入 ' + f.name + ' …');
     load(f);
   });
 
@@ -404,6 +522,7 @@
     if (!q) return;
     var 名 = decodeURIComponent(q.split('?')[0].split('/').pop() || '模型.glb');
     document.getElementById('iName').textContent = '正在加载 ' + 名 + ' …';
+    提示('正在加载 ' + 名 + ' …');
     fetch(q).then(function(r){
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.blob();
@@ -414,6 +533,7 @@
     }).catch(function(e){
       document.getElementById('iName').textContent = '加载失败：' + e.message
         + '（模型要放在 site/ 目录里）';
+      提示('加载失败：' + e.message, '#c2410c');
     });
   }
 
@@ -426,6 +546,14 @@
       curId = meta.cur || '';
     }catch(e){}
     items = items.filter(function(x){ return x && blobCache[x.id]; });   // 库里的 blob 真在才留
+    /* 旧数据清理：同名同大小的只留第一条（之前每次刷新都会重复加） */
+    var 见过 = {};
+    items = items.filter(function(x){
+      var k = (x.name || '') + '|' + (x.size || 0);
+      if (见过[k]) return false;
+      见过[k] = true;
+      return true;
+    });
     if (!curId || !blobCache[curId]) curId = items.length ? items[0].id : '';
     /* 🔴 不再自动打开上次那条（2026-10-27 改）：列表里可能躺着旧转换器产的坏结果，
        一打开页面就自动加载它，看着像"怎么又不对"。现在启动是空的，由使用者自己点。 */
@@ -433,6 +561,174 @@
     saveMeta();
     从网址加载();     // 网址里点了名的那个优先
   });
+
+  /* 左栏「+ 打开模型」：点一下弹系统选文件框（复用隐藏的 #pick）。 */
+  var 打开按钮 = document.getElementById('sbNew');
+  if (打开按钮){
+    /* 它现在是 <label for="pick"> —— 文件框由浏览器原生打开，不靠脚本 .click()。
+       这里只负责：记日志、清掉旧值（同一个文件再选一次也能触发 change）、写提示。 */
+    打开按钮.addEventListener('click', function(){
+      记日志('点左栏打开模型');
+      var p = document.getElementById('pick');
+      if (p) p.value = '';
+      else 记日志('找不到 #pick');
+      提示('文件选择框已打开，选一个 .glb / .fbx');
+    });
+  }
+
+  /* 验收：一个按钮，自动跑所有规则。
+     弹层关了就先用当前缓存重新打开模型，再跑。
+     返回逐项结果，给自动验收写日志用。 */
+  var 验收按钮 = document.getElementById('checkOrigin');
+  var 验收日志 = document.getElementById('checkLog');
+
+  var 验收序号 = 0;        // 连续点两次时，旧的那轮不要再往新日志里画
+
+  /* 逐条真跑：每一行先写「正在验收：X …」，等浏览器把这一帧画到屏幕上，
+     才去执行这条规则，算完再翻成通过/不通过，然后进入下一条。
+     返回 Promise，汇总给自动验收写 JSON。 */
+  function 跑验收(){
+    var 本轮 = ++验收序号;
+    var 汇总 = [];
+    return new Promise(function(完成){
+      if (!验收日志){ 完成(汇总); return; }
+
+      function 画一行(文字, 结果){
+        var 行 = document.createElement('div');
+        行.className = 结果 === null ? 'na' : (结果 ? 'ok' : 'bad');
+        行.textContent = 文字;
+        验收日志.appendChild(行);
+        return 行;
+      }
+
+      验收日志.innerHTML = '';
+      var 规则们 = window.pv3d验收规则 || [];
+      /* 验收顺序（阿聪 2026-11-03 定）：1 原点、2 模型缩放，
+         后面按管线往下排。规则数组本身的顺序不动，这里只排显示/执行顺序。 */
+      var 顺序 = [
+        '原点在脚底', '模型缩放', '人物高度/单位换算',
+        'root 角度', '骨骼名/数量', '材质槽', '多余物体',
+      ];
+      规则们 = 规则们.slice().sort(function(a, b){
+        var ia = 顺序.indexOf(a.名称), ib = 顺序.indexOf(b.名称);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+      });
+      if (!规则们.length){
+        画一行('没有验收规则', false);
+        记日志('验收：没有规则');
+        完成(汇总);
+        return;
+      }
+
+      var 失败 = [];
+      var 进度 = 画一行('准备验收 0 / ' + 规则们.length, null);
+      var i = 0;
+
+      function 下一步(){
+        if (本轮 !== 验收序号){ 完成(汇总); return; }
+        if (i >= 规则们.length){
+          进度.textContent = '验收完成，共 ' + 规则们.length + ' 项';
+          记日志('验收结果：' + 规则们.length + ' 项，不通过：' + (失败.join('、') || '无'));
+          完成(汇总);
+          return;
+        }
+
+        var 规则 = 规则们[i];
+        var 序号 = i + 1;
+        进度.textContent = '正在验收 ' + 序号 + ' / ' + 规则们.length;
+        var 行 = 画一行(序号 + '. 正在验收：' + 规则.名称 + ' …', null);
+
+        /* 160ms：先把「检测中」真的画出来，再算 —— 不是算完了假播 */
+        setTimeout(function(){
+          if (本轮 !== 验收序号){ 完成(汇总); return; }
+          try{
+            var 开始 = performance.now();
+            var r = 规则.检查();
+            var 用时 = Math.round((performance.now() - 开始) * 10) / 10;
+            var 结果 = r ? r.通过 : false;
+            var 结果字 = 结果 === null ? '不适用' : 结果 ? '通过' : '不通过';
+            if (结果 === false) 失败.push(规则.名称);
+            行.className = 结果 === null ? 'na' : (结果 ? 'ok' : 'bad');
+            行.textContent = 序号 + '. ' + 规则.名称 + '：' + 结果字
+              + (r && r.说明 ? '（' + r.说明 + '）' : '');
+            /* 第二行：手动验证办法（阿聪 2026-11-03 要求每条都写清楚） */
+            var 手 = document.createElement('div');
+            手.className = '手动';
+            手.textContent = '手动验证办法：' + (规则.手动 || '（未写）');
+            行.appendChild(手);
+            记日志('验收：' + 序号 + '/' + 规则们.length + ' ' + 规则.名称
+              + ' → ' + 结果字 + '（' + 用时 + 'ms）');
+            汇总.push({
+              序号: 序号,
+              规则: 规则.名称,
+              结果: 结果字,
+              说明: (r && r.说明) || '',
+              手动: 规则.手动 || '',
+            });
+          }catch(e){
+            行.className = 'bad';
+            行.textContent = 序号 + '. ' + 规则.名称 + '：验收出错（' + e.message + '）';
+            记日志('验收异常：' + (e.stack || e.message));
+          }
+          i++;
+          下一步();
+        }, 160);
+      }
+      下一步();
+    });
+  }
+  window.验收运行 = 跑验收;
+
+  if (验收按钮 && 验收日志){
+    验收按钮.textContent = '验收';
+    验收按钮.addEventListener('click', function(){
+      记日志('点验收');
+      if (window.pv3dObjReady && window.pv3dObjReady()){ 跑验收(); return; }
+      记日志('验收：模型没打开，尝试重新打开');
+      var it = items.filter(function(x){ return x.id === curId; })[0];
+      var blob = it && blobCache[it.id];
+      if (!blob){
+        var 行 = document.createElement('div');
+        行.className = 'bad'; 行.textContent = '还没有模型，先打开一个';
+        验收日志.appendChild(行);
+        记日志('验收：没有模型');
+        return;
+      }
+      show(it.name, blob);
+      var 等 = setInterval(function(){
+        if (window.pv3dObjReady && window.pv3dObjReady()){
+          clearInterval(等); 跑验收();
+        }
+      }, 300);
+      setTimeout(function(){
+        clearInterval(等);
+        记日志('验收：等模型打开超时');
+      }, 8000);
+    });
+  }
+
+  /* 自动验收：网址带 check=1 时，模型一准备好就跑一遍，
+     把逐项结果写成一行「自动验收结果：<JSON>」到日志。
+     给盲测和自动化用 —— 答题方不用点按钮，直接读日志。 */
+  function 自动验收启动(){
+    var 开始 = Date.now();
+    var 等 = setInterval(function(){
+      if (window.pv3dObjReady && window.pv3dObjReady()){
+        clearInterval(等);
+        跑验收().then(function(汇总){
+          记日志('自动验收结果：' + JSON.stringify(汇总));
+        });
+        return;
+      }
+      if (Date.now() - 开始 > 30000){
+        clearInterval(等);
+        记日志('自动验收结果：[]');
+      }
+    }, 400);
+  }
+  var 查询 = '';
+  try{ 查询 = new URLSearchParams(location.search).get('check') || ''; }catch(e){}
+  if (查询 === '1') 自动验收启动();
 })();
 </script>
 </body>

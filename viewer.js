@@ -118,6 +118,502 @@ function pv3dModelBox(obj){
   return bb;
 }
 
+/* 验收规则：原点是否在脚底。
+   判据跟 Blender 的 `origin_to_bottom.py` 对齐：**只看主网格**，
+   最低点 Y ≈ 0、XZ 平面中心 ≈ 0。容差由调用方传（默认 0.01，按身高比例）。 */
+/* ---------- 主网格 / 朝向检测（2026-11-03）----------
+   验收和朝向都只看「主网格」= 顶点最多的那个 mesh。
+   旧脚本 origin_to_bottom.py 的判据也是主网格；把所有 mesh 一起算会被配件拉偏。 */
+function pv3dMainMesh(){
+  if (!pv3dObj) return null;
+  var 最好 = null, 最多 = -1;
+  pv3dObj.traverse(function(o){
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) return;
+    var n = o.geometry.attributes.position.count;
+    if (n > 最多){ 最多 = n; 最好 = o; }
+  });
+  return 最好;
+}
+
+function pv3dMainMeshBox(){
+  var o = pv3dMainMesh();
+  if (!o) return new THREE.Box3();
+  pv3dObj.updateMatrixWorld(true);
+  var bb = new THREE.Box3();
+  if (o.isSkinnedMesh && o.skeleton){
+    o.computeBoundingBox();
+    if (o.boundingBox) bb.copy(o.boundingBox).applyMatrix4(o.matrixWorld);
+  } else {
+    bb.setFromObject(o);
+  }
+  return bb;
+}
+
+function pv3dSampleMainPoints(上限){
+  上限 = 上限 || 20000;
+  var o = pv3dMainMesh();
+  if (!o) return [];
+  var pos = o.geometry.attributes.position;
+  var 步 = Math.max(1, Math.ceil(pos.count / 上限));
+  var 点们 = [];
+  var v = new THREE.Vector3();
+  o.updateMatrixWorld(true);
+  for (var i = 0; i < pos.count; i += 步){
+    v.fromBufferAttribute(pos, i);
+    if (o.isSkinnedMesh && o.skeleton){
+      /* r160 叫 boneTransform，新版叫 applyBoneTransform，两个都认 */
+      if (typeof o.boneTransform === 'function') o.boneTransform(i, v);
+      else if (typeof o.applyBoneTransform === 'function') o.applyBoneTransform(i, v);
+    }
+    v.applyMatrix4(o.matrixWorld);
+    点们.push(v.clone());
+  }
+  return 点们;
+}
+
+/* 骨骼快路径：同时找到髋/根 和 头，方向能 snap 到最近轴（22° 内）才采用。 */
+function pv3dBoneUp(){
+  var 主 = pv3dMainMesh();
+  if (!主 || !主.isSkinnedMesh || !主.skeleton) return null;
+  var 髋 = null, 头 = null;
+  (主.skeleton.bones || []).forEach(function(b){
+    var n = (b.name || '').toLowerCase();
+    if (!髋 && /(hips|pelvis|root)/.test(n)) 髋 = b;
+    if (!头 && /head/.test(n)) 头 = b;
+  });
+  if (!髋 || !头) return null;
+  var a = 髋.getWorldPosition(new THREE.Vector3());
+  var b = 头.getWorldPosition(new THREE.Vector3());
+  var d = b.clone().sub(a);
+  if (d.lengthSq() < 1e-8) return null;
+  return d.normalize();
+}
+
+/* 朝向检测：6 个候选轴，取「底部 10% 薄片」的宽高比做分。
+   分数高 = 这个轴是高度、窄的那端是脚。 */
+function pv3dDetectUp(){
+  var 轴们 = [
+    { 名: 'X', 向量: new THREE.Vector3(1, 0, 0) },
+    { 名: '-X', 向量: new THREE.Vector3(-1, 0, 0) },
+    { 名: 'Y', 向量: new THREE.Vector3(0, 1, 0) },
+    { 名: '-Y', 向量: new THREE.Vector3(0, -1, 0) },
+    { 名: 'Z', 向量: new THREE.Vector3(0, 0, 1) },
+    { 名: '-Z', 向量: new THREE.Vector3(0, 0, -1) },
+  ];
+  var 点们 = pv3dSampleMainPoints(20000);
+  if (!点们.length){
+    return { 轴: 'Y', 向量: 轴们[2].向量, 分数: {}, 置信: '不确定', 依据: '没有顶点' };
+  }
+
+  var 分数 = {};
+  轴们.forEach(function(a){
+    var 投影 = 点们.map(function(p){ return p.dot(a.向量); });
+    var 最小 = Infinity, 最大 = -Infinity;
+    for (var i = 0; i < 投影.length; i++){
+      if (投影[i] < 最小) 最小 = 投影[i];
+      if (投影[i] > 最大) 最大 = 投影[i];
+    }
+    var 高 = 最大 - 最小;
+    if (高 <= 1e-9){ 分数[a.名] = 0; return; }
+    var 阈 = 最小 + 高 * 0.1;
+    var 横1 = Math.abs(a.向量.y) > 0.5 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    var 横2 = new THREE.Vector3().crossVectors(a.向量, 横1).normalize();
+    /* 薄片的跨度 = 薄片内两个横向坐标各自的 (max - min)，
+       不能用顶点到原点的距离 —— 模型原点不在世界原点时会整体抬高、比值失真。 */
+    var a1最小 = Infinity, a1最大 = -Infinity;
+    var a2最小 = Infinity, a2最大 = -Infinity;
+    var 有 = false;
+    for (var j = 0; j < 点们.length; j++){
+      if (投影[j] > 阈) continue;
+      有 = true;
+      var v1 = 点们[j].dot(横1), v2 = 点们[j].dot(横2);
+      if (v1 < a1最小) a1最小 = v1;
+      if (v1 > a1最大) a1最大 = v1;
+      if (v2 < a2最小) a2最小 = v2;
+      if (v2 > a2最大) a2最大 = v2;
+    }
+    var 跨 = 有 ? Math.max(a1最大 - a1最小, a2最大 - a2最小) : 0;
+    分数[a.名] = (有 && 跨 > 1e-9) ? 高 / 跨 : 0;
+  });
+
+  var 排序 = 轴们.slice().sort(function(a, b){ return (分数[b.名] || 0) - (分数[a.名] || 0); });
+  var 第一 = 排序[0], 第二 = 排序[1];
+  var 高1 = 分数[第一.名] || 0, 高2 = 分数[第二.名] || 0;
+  var 确定 = 高1 >= 1.15 * 高2 && 高1 > 1.5;
+
+  /* 分数高 =「这个轴的负方向端薄片窄」。窄端是头，所以真正的 up
+     是选中轴的反方向，不能直接拿 第一.名 当 up。 */
+  var 反向名 = 第一.名.charAt(0) === '-' ? 第一.名.slice(1) : '-' + 第一.名;
+  var 结果 = {
+    轴: 反向名, 向量: 第一.向量.clone().negate(), 分数: 分数,
+    置信: 确定 ? '确定' : '不确定', 依据: '几何',
+  };
+
+  var 骨方向 = pv3dBoneUp();
+  if (骨方向){
+    var 最近 = 轴们[0], 点积 = -2;
+    轴们.forEach(function(a){
+      var d = 骨方向.dot(a.向量);
+      if (d > 点积){ 点积 = d; 最近 = a; }
+    });
+    if (点积 > Math.cos(22 * Math.PI / 180)){
+      结果 = {
+        轴: 最近.名, 向量: 最近.向量, 分数: 分数,
+        置信: '确定', 依据: '骨骼',
+      };
+    }
+  }
+  return 结果;
+}
+
+var pv3dUpInfo = { 轴: 'Y', 置信: '初始', 依据: '未检测' };
+var pv3dBaseQuaternion = null;
+
+function pv3dUpQuaternion(轴){
+  var q = new THREE.Quaternion();
+  if (轴 === 'X') q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
+  else if (轴 === '-X') q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.PI / 2);
+  else if (轴 === 'Z') q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+  else if (轴 === '-Z') q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+  else if (轴 === '-Y') q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+  return q;
+}
+
+function pv3dApplyUp(轴, 依据, 置信){
+  if (!pv3dObj) return;
+  if (pv3dBaseQuaternion) pv3dObj.quaternion.copy(pv3dBaseQuaternion);
+  var q = pv3dUpQuaternion(轴);
+  if (Math.abs(q.w - 1) > 1e-6) pv3dObj.quaternion.premultiply(q);
+  pv3dObj.updateMatrixWorld(true);
+  pv3dUpInfo = { 轴: 轴, 置信: 置信 || '手动', 依据: 依据 || '手动' };
+}
+
+function pv3dDetectAndApplyUp(){
+  if (!pv3dObj) return pv3dUpInfo;
+  pv3dBaseQuaternion = pv3dObj.quaternion.clone();
+
+  /* 硬护栏：Y 已经是三轴里跨度最大的，就认为模型本来就是 Y-up，不转。
+     glTF 标准是 Y-up；自动转只用来救明显不是 Y-up 的模型。
+     这条挡住「几何判据把正常 Y-up 角色判成 -Z、然后整个人转躺」的回归。 */
+  var bb = pv3dModelBox(pv3dObj);
+  var 尺寸 = bb.isEmpty() ? null : bb.getSize(new THREE.Vector3());
+  if (尺寸 && 尺寸.y >= 尺寸.x && 尺寸.y >= 尺寸.z){
+    pv3dUpInfo = { 轴: 'Y', 置信: '确定', 依据: 'Y 跨度最大' };
+    return pv3dUpInfo;
+  }
+
+  var 结果 = pv3dDetectUp();
+  if (结果.置信 === '确定' && 结果.轴 !== 'Y'){
+    pv3dApplyUp(结果.轴, 结果.依据, '确定');
+  } else if (结果.置信 === '确定' && 结果.轴 === 'Y'){
+    pv3dUpInfo = { 轴: 'Y', 置信: '确定', 依据: 结果.依据 };
+  } else {
+    pv3dUpInfo = {
+      轴: '未知', 置信: '不确定', 依据: 结果.依据, 分数: 结果.分数,
+    };
+  }
+  return pv3dUpInfo;
+}
+
+window.pv3dDetectUp = pv3dDetectUp;
+window.pv3dApplyUp = pv3dApplyUp;
+window.pv3dUpInfo = function(){ return pv3dUpInfo; };
+window.pv3dObjReady = function(){ return !!pv3dObj; };
+
+/* ---------- 验收规则（一项一条，互不影响；加规则只往数组里加一项）---------- */
+function pv3d规则结果(通过, 说明, 数值){
+  return { 通过: 通过, 说明: 说明 || '', 数值: 数值 || {} };
+}
+
+function pv3d收集材质(){
+  var 材质们 = [];
+  if (!pv3dObj) return 材质们;
+  pv3dObj.traverse(function(o){
+    if (!o.isMesh || !o.material) return;
+    (Array.isArray(o.material) ? o.material : [o.material]).forEach(function(m){
+      if (m && 材质们.indexOf(m) < 0) 材质们.push(m);
+    });
+  });
+  return 材质们;
+}
+
+var pv3d验收规则 = [
+  {
+    id: '原点',
+    名称: '原点在脚底',
+    手动: '点「调试 → 显示原点」，看三轴是否落在脚底中心。',
+    检查: function(){ return window.pv3dCheckOrigin(0.01); },
+  },
+  {
+    id: '单位',
+    名称: '人物高度/单位换算',
+    手动: '点「调试 → 尺寸」，看「高 x.xx m」标签：人形应在 1.2–2.5 米；0.7 米左右多半是英寸/厘米差了 2.54 倍。',
+    检查: function(){
+      if (!pv3dObj) return pv3d规则结果(null, '没有模型');
+      if (pv3dUpInfo.置信 === '不确定') return pv3d规则结果(null, '朝向未确定，高度不可信');
+      var bb = pv3dModelBox(pv3dObj);
+      if (bb.isEmpty()) return pv3d规则结果(false, '没有网格');
+      var 高 = bb.max.y - bb.min.y;
+
+      /* 人物身高范围：1.2–2.5 米（儿童 ~1.2，高个 ~2.0，留到 2.5 兜住厚底/帽子）。
+         ⚠️ 这是「角色管线」的判据，不是通用模型判据 —— 怪物/载具要另开规则。
+         🔴 为什么要这一条（2026-11-03 动画 zkk 报的）：
+            Maya 默认厘米，183cm 的模型导进 3ds Max 时系统单位是英寸、勾了单位转换，
+            183 厘米被换算成 72 存进场景；后来系统单位改成厘米，数字 72 没变，
+            导出时就声明成「72 厘米」，UE 收到只有实际身高的 1/2.54。
+         所以这里专门认 **2.54 倍**：
+           实际高度 × 2.54 落进人物范围 → 就是英寸/厘米丢掉的那一档；
+           实际高度 ÷ 2.54 落进人物范围 → 反方向多算了 2.54 倍。 */
+      var 人形范围 = function(h){ return h >= 1.2 && h <= 2.5; };
+      var 说明 = '高度 ' + 高.toFixed(3) + ' 米';
+
+      if (人形范围(高)){
+        return pv3d规则结果(true, 说明 + '，在 1.2–2.5 米内', { 高度: 高 });
+      }
+      var 乘 = 高 * 2.54, 除 = 高 / 2.54;
+      if (人形范围(乘)){
+        return pv3d规则结果(false,
+          说明 + '，不在 1.2–2.5 米内；乘 2.54 是 ' + 乘.toFixed(2)
+          + ' 米 —— 疑似 Max 英寸/厘米换算丢了 2.54 倍',
+          { 高度: 高, 乘254后: 乘 });
+      }
+      if (人形范围(除)){
+        return pv3d规则结果(false,
+          说明 + '，不在 1.2–2.5 米内；除以 2.54 是 ' + 除.toFixed(2)
+          + ' 米 —— 疑似单位换算多了 2.54 倍',
+          { 高度: 高, 除254后: 除 });
+      }
+      return pv3d规则结果(false, 说明 + '，不在人物身高 1.2–2.5 米内', { 高度: 高 });
+    },
+  },
+  {
+    id: '缩放',
+    名称: '模型缩放',
+    手动: '点「调试 → 根节点」，直接看根节点原始对象的 scale 是不是 1, 1, 1。',
+    检查: function(){
+      if (!pv3dObj) return pv3d规则结果(null, '没有模型');
+      /* 只看模型本体：场景根节点自己的 scale 是不是 1.0。
+         不深入子节点 —— 网格/骨骼的局部缩放是建模结构的一部分，不算「本体缩放」。
+         也不看身高：巨人只要根节点缩放是 1 就通过。
+         （阿聪 2026-11-03：结论要写清楚「查的是根节点 scale」。） */
+      var 根们 = pv3dObj.children.filter(function(c){ return c && c.isObject3D; });
+      if (!根们.length) return pv3d规则结果(null, '找不到根节点，不适用');
+
+      var 问题 = [];
+      根们.forEach(function(c){
+        var s = c.scale;
+        if (Math.abs(s.x - 1) > 0.01 ||
+            Math.abs(s.y - 1) > 0.01 ||
+            Math.abs(s.z - 1) > 0.01){
+          问题.push((c.name || '(无名)') + ' ×'
+            + s.x.toFixed(3) + ', ' + s.y.toFixed(3) + ', ' + s.z.toFixed(3));
+        }
+      });
+      var 通过 = 问题.length === 0;
+      return pv3d规则结果(通过,
+        通过 ? '根节点 scale 全部为 1.0（只查根节点，部件内部缩放不算）'
+             : '根节点 scale 不是 1：' + 问题.join('；'),
+        { 问题: 问题 });
+    },
+  },
+  {
+    id: 'root角度',
+    名称: 'root 角度',
+    手动: '点「调试 → 根节点」，看根节点原始对象的 rotation 是不是 0, 0, 0, 1。',
+    检查: function(){
+      if (!pv3dObj) return pv3d规则结果(null, '没有模型');
+      /* glb scene 可以有多个直接子节点，逐个查，取偏离最大的那个。
+         不查 pv3dObj.quaternion —— 上面挂着朝向修正，会自己把自己判红。 */
+      var 根们 = pv3dObj.children.filter(function(c){ return c && c.isObject3D; });
+      if (!根们.length) return pv3d规则结果(null, '找不到根节点，不适用');
+      var 最大角度 = 0, 最大节点 = null;
+      根们.forEach(function(c){
+        var a = 2 * Math.acos(Math.min(1, Math.abs(c.quaternion.w))) * 180 / Math.PI;
+        if (a > 最大角度){ 最大角度 = a; 最大节点 = c; }
+      });
+      var 通过 = 最大角度 < 1;
+      var 欧拉 = 最大节点
+        ? new THREE.Euler().setFromQuaternion(最大节点.quaternion)
+        : new THREE.Euler();
+      var 说明 = 通过
+        ? 'root 没有旋转'
+        : 'root 旋转了 ' + 最大角度.toFixed(2) + ' 度（'
+          + (欧拉.x * 180 / Math.PI).toFixed(1) + ', '
+          + (欧拉.y * 180 / Math.PI).toFixed(1) + ', '
+          + (欧拉.z * 180 / Math.PI).toFixed(1) + '）';
+      return pv3d规则结果(通过, 说明, { 角度: 最大角度 });
+    },
+  },
+  {
+    id: '骨骼',
+    名称: '骨骼名/数量',
+    手动: '点左栏「显示骨名」，数骨头、看有没有重名或空白；也可以在 Blender 大纲里核对。',
+    检查: function(){
+      /* 多个 SkinnedMesh 共用同一套骨架时，同一根骨会被遍历到多次；
+         按骨头对象身份去重，不能直接 concat。 */
+      var 骨 = [];
+      pv3dObj.traverse(function(o){
+        if (!o.isSkinnedMesh || !o.skeleton || !o.skeleton.bones) return;
+        o.skeleton.bones.forEach(function(b){
+          if (骨.indexOf(b) < 0) 骨.push(b);
+        });
+      });
+      if (!骨.length) return pv3d规则结果(null, '这个模型没有骨骼，不适用');
+
+      var 计数 = {}, 重复 = [], 无名 = 0;
+      骨.forEach(function(b){
+        var n = b.name || '';
+        if (!n){ 无名++; return; }
+        计数[n] = (计数[n] || 0) + 1;
+      });
+      Object.keys(计数).forEach(function(n){
+        if (计数[n] > 1) 重复.push(n + '×' + 计数[n]);
+      });
+      var 问题 = [];
+      if (重复.length) 问题.push('重名骨骼：' + 重复.join('、'));
+      if (无名) 问题.push('无名骨骼 ' + 无名 + ' 根');
+      var 通过 = 问题.length === 0;
+      return pv3d规则结果(通过,
+        通过 ? '骨骼 ' + 骨.length + ' 根，无重名、无无名'
+             : 问题.join('；'),
+        { 数量: 骨.length, 重复: 重复, 无名: 无名 });
+    },
+  },
+  {
+    id: '材质槽',
+    名称: '材质槽',
+    手动: '点「调试 → 模型信息」，在原始 JSON 里 Ctrl+F 搜 "materials"，看 emissiveFactor 和贴图引用。',
+    检查: function(){
+      var 材质们 = pv3d收集材质();
+      if (!材质们.length) return pv3d规则结果(null, '这个模型没有材质，不适用');
+
+      /* 没有定版表之前，能自动判的是：材质名不重复、单网格槽位数量不失控、
+         贴图不是 1x1 占位图。材质球的实际颜色也一起报出来，让阿聪自己对照。
+         🔴 为什么查 1x1（2026-11-03）：源文件里贴图槽连着不存在的 DDS，
+           转换器会塞一张 1x1 纯色占位图 —— 它会把材质球的颜色整个染掉，
+           看着就是「颜色跟原本对不上」。 */
+      var 计数 = {}, 重名 = [];
+      材质们.forEach(function(m){
+        var n = m.name || '';
+        if (n) 计数[n] = (计数[n] || 0) + 1;
+      });
+      Object.keys(计数).forEach(function(n){
+        if (计数[n] > 1) 重名.push(n + '×' + 计数[n]);
+      });
+
+      var 大槽 = [];
+      pv3dObj.traverse(function(o){
+        if (o.isMesh && Array.isArray(o.material) && o.material.length > 8){
+          大槽.push(o.name + '(' + o.material.length + ')');
+        }
+      });
+
+      /* 1x1 占位贴图：任何槽位上的 image 只有 1 像素，就是源文件缺图 */
+      var 槽中文 = {
+        map: '底色', normalMap: '法线', metalnessMap: '金属',
+        roughnessMap: '粗糙', emissiveMap: '自发光', aoMap: 'AO',
+      };
+      var 占位 = [];
+      材质们.forEach(function(m){
+        var 坏 = [];
+        Object.keys(槽中文).forEach(function(k){
+          var t = m[k];
+          if (!t || !t.image) return;
+          var w = t.image.width || 0, h = t.image.height || 0;
+          if (w <= 1 || h <= 1) 坏.push(槽中文[k] + ' ' + w + 'x' + h);
+        });
+        if (坏.length) 占位.push((m.name || '(无名)') + '：' + 坏.join('、'));
+      });
+
+      var 问题 = [];
+      if (重名.length) 问题.push('重名材质：' + 重名.join('、'));
+      if (大槽.length) 问题.push('单网格槽位过多：' + 大槽.join('、'));
+      if (占位.length) 问题.push('贴图是 1x1 占位图（源文件缺图，会把材质球颜色染掉）：' + 占位.join('；'));
+
+      /* 每个材质球的实际颜色：底色 + 自发光（自发光不是黑才写） */
+      var 描述 = 材质们.map(function(m){
+        var s = m.name || '(无名)';
+        if (m.color) s += ' 底色 #' + m.color.getHexString();
+        var e = m.emissive;
+        if (e && (e.r > 0.001 || e.g > 0.001 || e.b > 0.001)){
+          s += ' 自发光 #' + e.getHexString();
+        }
+        return s;
+      });
+      var 名清单 = 材质们.map(function(m){ return m.name || '(无名)'; });
+      var 通过 = 问题.length === 0;
+      /* 不通过时也把材质球颜色带上 —— 排查「颜色对不上」正是要看这个 */
+      var 说明 = (问题.length ? 问题.join('；') + '。当前材质：' : '材质 ' + 材质们.length + ' 个：')
+        + 描述.join('；');
+      return pv3d规则结果(通过, 说明,
+        { 数量: 材质们.length, 名字: 名清单, 占位贴图: 占位 });
+    },
+  },
+  {
+    id: '异物',
+    名称: '多余物体',
+    手动: '点「白模」或「显示布线」，看有没有藏在身体里的方块/球；再看「模型信息」原始 JSON 的 nodes 名称有没有 Cube/Sphere/Plane。',
+    检查: function(){
+      var 疑点 = [], 网格名 = [];
+      pv3dObj.traverse(function(o){
+        if (!o.isMesh) return;
+        网格名.push(o.name || '(无名)');
+        var n = (o.name || '').toLowerCase();
+        if (/^(cube|sphere|plane|cylinder|icosphere|empty)/.test(n)) 疑点.push(o.name);
+      });
+      var 根数 = pv3dObj.children.filter(function(c){ return c && c.isObject3D; }).length;
+      if (根数 > 1) 疑点.push('多个根节点（' + 根数 + '）');
+      var 通过 = 疑点.length === 0;
+      return pv3d规则结果(通过,
+        通过 ? '没有明显多余物体（网格 ' + 网格名.length + ' 个）' : '可疑：' + 疑点.join('、'),
+        { 疑点: 疑点, 网格: 网格名 });
+    },
+  },
+];
+
+window.pv3d验收规则 = pv3d验收规则;
+
+window.pv3dCheckOrigin = function(容差比例){
+  容差比例 = (typeof 容差比例 === 'number') ? 容差比例 : 0.01;
+  if (!pv3dObj) return { 通过:false, 说明:'还没有加载模型', 数值:{} };
+  if (pv3dUpInfo.置信 === '不确定'){
+    return { 通过:null, 说明:'朝向未确定，先在调试里手动选 X/Y/Z', 数值:{} };
+  }
+
+  /* 判据跟 Blender 的 `origin_to_bottom.py` **对齐**（2026-11-03）：
+     只量**主网格**（顶点最多的那个）的包围盒 —— 最低点 Y≈0、X 中心≈0、Z 中心≈0。
+     Blender 那边（Z-up）挪的就是主网格的「水平中心 + 最低点」；
+     验收用另一把尺子（全部网格 + 脚部薄片中心）会出现
+     「Blender 明明挪好了、这里判红」，两边对不上。
+     ⚠️ 轴对应：Blender 的 Z 最低点 = 这里的 Y 最低点。 */
+  var 主 = pv3dMainMesh();
+  if (!主) return { 通过:false, 说明:'模型没有网格', 数值:{} };
+  var bb = pv3dMainMeshBox();
+  if (bb.isEmpty()) return { 通过:false, 说明:'主网格没有包围盒', 数值:{} };
+
+  var 高 = bb.max.y - bb.min.y;
+  var 容差 = Math.max(高 * 容差比例, 1e-6);
+  var minY = bb.min.y;
+  var cx = (bb.min.x + bb.max.x) / 2;
+  var cz = (bb.min.z + bb.max.z) / 2;
+
+  var 问题 = [];
+  if (Math.abs(minY) > 容差) 问题.push('脚底最低点 Y=' + minY.toFixed(4) + '，应接近 0');
+  if (Math.abs(cx) > 容差) 问题.push('左右中心 X=' + cx.toFixed(4) + '，应接近 0');
+  if (Math.abs(cz) > 容差) 问题.push('前后中心 Z=' + cz.toFixed(4) + '，应接近 0');
+  return {
+    通过: 问题.length === 0,
+    说明: 问题.length
+      ? 问题.join('；')
+      : '原点在脚底，偏差在 ' + 容差.toFixed(4) + ' 以内',
+    数值: {
+      最低点Y: minY, X中心: cx, Z中心: cz,
+      容差: 容差, 主网格: 主.name || '(无名)',
+      朝向: pv3dUpInfo.轴 + '（' + pv3dUpInfo.置信 + '，' + pv3dUpInfo.依据 + '）',
+    },
+  };
+};
+
 function frame(obj){
   if (!obj) return;
   var bb = pv3dModelBox(obj);
@@ -797,6 +1293,11 @@ var PV3D_HTML = '<div class="pv3d-box">' +
              一行都不用改，只是换了件"外套"（.pv3d-fit -> .pv3d-dbg-item）。
              亮起的类名照旧是 `did`（样式见上面 .pv3d-dbg-item.did）。 */
           '<button class="pv3d-dbg-item" id="pv3dOrigin" title="在模型的原点上画 XYZ 三轴（红 = X · 绿 = Y · 蓝 = Z，箭头指正方向）">显示原点</button>' +
+          /* 🆕 2026-11-03「尺寸」—— 阿聪：「有没有什么按钮可以可视化这个缩放呢？
+             我希望自己能亲眼看见的」。脚底铺 1 米网格 + 标出宽/深/高，
+             跟 3ds Max 的 Measure 一样，缩放对不对一眼看出来（见 `pv3dApplySize`）。
+             位置：阿聪 当天改口「不希望显示在左栏板，直接搞进调试里」。 */
+          '<button class="pv3d-dbg-item" id="pv3dSize" title="脚底铺 1 米网格，标出宽/深/高 —— 一眼看出模型是几米、缩放对不对">尺寸</button>' +
           /* 🆕 2026-10-15「显示面朝向」—— **正面蓝、背面红**，一眼看出哪些面朝向反了
              （法线朝内）。为什么加它、怎么画的，见下面 `pv3dApplyFacing` 那段。 */
           '<button class="pv3d-dbg-item" id="pv3dFacing" title="正面蓝 / 背面红 —— 一眼看出哪些面朝向反了（法线朝内）">显示面朝向</button>' +
@@ -813,6 +1314,11 @@ var PV3D_HTML = '<div class="pv3d-box">' +
              然后纯法线呢就继续留在左栏」）—— 左栏那张两格卡因此拆开了，左边现在只有「纯法线」。
              ⚠️ 高亮/点击都跟「纯法线」共用同一套（见 `pv3dMarkBakeBtns` / `pv3dBindBakeOne`）。 */
           '<button class="pv3d-dbg-item" id="pv3dNormalOff" title="关掉法线">关掉法线</button>' +
+          /* 🆕 2026-11-03「模型信息」—— 阿聪要自己核对「模型缩放」那条。
+             点了**另开一个只读页面**（不是调试小框里那点地方），
+             列出根节点和全部节点的 scale；根节点不是 1.0 的标红。 */
+          '<button class="pv3d-dbg-item" id="pv3dInfo" title="只读：另开一页显示完整的原始 glTF JSON">模型信息</button>' +
+          '<button class="pv3d-dbg-item" id="pv3dRoot" title="只读：只摘场景根节点的原始对象，查 scale 不用在几百个节点里翻">根节点</button>' +
         '</div>' +
       '</details>' +
       // 三角面数：**画布左上角一行小字**（样式见上面 PV3D_CSS 里的 .pv3d-stat）
@@ -1059,7 +1565,10 @@ function pv3dApplyOrigin(){
   old.forEach(function(o){
     if (o.parent) o.parent.remove(o);
     o.traverse(function(c){ if (c.geometry) c.geometry.dispose(); });
-    if (o.material) o.material.dispose();
+    if (o.material){
+      if (o.material.map) o.material.map.dispose();
+      o.material.dispose();
+    }
   });
   if (!originOn || !pv3dObj) return;
 
@@ -1076,10 +1585,15 @@ function pv3dApplyOrigin(){
   var g = new THREE.Group();
   g.userData.__origin = true;
   g.position.copy(org);                          // 画在**模型的原点**上
-  /* 红 X / 绿 Y / 蓝 Z（跟 Blender 一致） */
-  [[1, 0, 0, 0xff3b30], [0, 1, 0, 0x2fbf4f], [0, 0, 1, 0x2f6bff]].forEach(function(a){
-    var arr = new THREE.ArrowHelper(new THREE.Vector3(a[0], a[1], a[2]),
-                                    new THREE.Vector3(0, 0, 0), len, a[3], headL, headW);
+  /* 红 X / 绿 Y / 蓝 Z（跟 Blender 一致），轴尖带字母标签 */
+  [
+    { 方向: [1, 0, 0], 颜色: 0xff3b30, 字: "X" },
+    { 方向: [0, 1, 0], 颜色: 0x2fbf4f, 字: "Y" },
+    { 方向: [0, 0, 1], 颜色: 0x2f6bff, 字: "Z" },
+  ].forEach(function(a){
+    var 方向 = new THREE.Vector3(a.方向[0], a.方向[1], a.方向[2]);
+    var arr = new THREE.ArrowHelper(方向, new THREE.Vector3(0, 0, 0),
+                                    len, a.颜色, headL, headW);
     /* 穿透显示（跟骨架同一个道理）：不然长在身体里 / 被脚底挡着那半截看不见。
        `renderOrder` 拉高 → 画在网格**之后**，配 `depthTest:false` 才真盖在上面。 */
     arr.line.material.depthTest = false;
@@ -1087,8 +1601,256 @@ function pv3dApplyOrigin(){
     arr.line.renderOrder = 997;
     arr.cone.renderOrder = 997;
     g.add(arr);
+
+    /* 轴尖上的 X / Y / Z：用一张小画布画字，贴成 Sprite，永远面向镜头 */
+    var 画布 = document.createElement("canvas");
+    画布.width = 画布.height = 64;
+    var 笔 = 画布.getContext("2d");
+    笔.fillStyle = "#" + a.颜色.toString(16).padStart(6, "0");
+    笔.font = "bold 46px Arial";
+    笔.textAlign = "center";
+    笔.textBaseline = "middle";
+    笔.fillText(a.字, 32, 32);
+
+    var 贴图 = new THREE.CanvasTexture(画布);
+    贴图.minFilter = THREE.LinearFilter;
+    var 标签 = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: 贴图, depthTest: false, transparent: true,
+    }));
+    标签.position.copy(方向.clone().multiplyScalar(len * 1.16));
+    var 字大 = len * 0.24;
+    标签.scale.set(字大, 字大, 1);
+    标签.renderOrder = 998;
+    标签.userData.__origin = true;
+    g.add(标签);
   });
   scene.add(g);
+}
+
+/* ---------- 「尺寸」开关（阿聪 2026-11-03）----------
+   干什么：脚底铺一张 **1 米一格** 的地面网格，再沿包围盒画出
+   **宽 / 深 / 高** 三条尺寸线，各带一个数字标签（跟 3ds Max 的 Measure 一个意思）。
+   为什么要它：模型缩放那条规则只给个数字，阿聪「还是希望自己能亲眼看见」——
+   网格往脚下一铺，1.75 米和 17.5 米一眼就分出来了。
+
+   画法上的三点：
+   ① 网格**按世界原点对齐**（线的位置落在整数米上），不是跟着模型中心跑 ——
+      这样它是个绝对尺子，模型偏移了也看得出来。
+   ② 尺寸线**挂 scene、不挂模型**（跟「显示原点」同一个道理：不继承模型缩放）。
+   ③ 全部 `depthTest:false`：线常常贴着身体/脚底，不穿透就等于看不见。 */
+var sizeOn = false;
+
+function pv3dClearSize(){
+  if (typeof scene === 'undefined' || !scene) return;
+  var old = [];
+  scene.traverse(function(o){ if (o.userData && o.userData.__size) old.push(o); });
+  old.forEach(function(o){
+    if (o.parent) o.parent.remove(o);
+    o.traverse(function(c){
+      if (c.geometry) c.geometry.dispose();
+      if (c.material){ if (c.material.map) c.material.map.dispose(); c.material.dispose(); }
+    });
+  });
+}
+
+function pv3dSizeLabel(文字, 高){
+  var 画布 = document.createElement('canvas');
+  画布.width = 512; 画布.height = 128;
+  var 笔 = 画布.getContext('2d');
+  笔.font = 'bold 64px "Microsoft YaHei", Arial, sans-serif';
+  笔.textAlign = 'center';
+  笔.textBaseline = 'middle';
+  /* 先描一圈白边再填字 —— 标签会压在网格/模型上，没有底衬会糊 */
+  笔.lineWidth = 12;
+  笔.strokeStyle = 'rgba(255,255,255,0.92)';
+  笔.strokeText(文字, 256, 64);
+  笔.fillStyle = '#8a4b1e';
+  笔.fillText(文字, 256, 64);
+  var 贴图 = new THREE.CanvasTexture(画布);
+  贴图.minFilter = THREE.LinearFilter;
+  var 标签 = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: 贴图, depthTest: false, transparent: true,
+  }));
+  标签.scale.set(高 * 4, 高, 1);      // 画布 4:1，世界尺寸保持同比
+  标签.renderOrder = 999;
+  标签.userData.__size = true;
+  return 标签;
+}
+
+function pv3dSizeLine(点们, 颜色){
+  var 几何 = new THREE.BufferGeometry().setFromPoints(点们);
+  var 线 = new THREE.Line(几何, new THREE.LineBasicMaterial({
+    color: 颜色, depthTest: false, transparent: true,
+  }));
+  线.renderOrder = 998;
+  线.userData.__size = true;
+  return 线;
+}
+
+function pv3dApplySize(){
+  pv3dClearSize();
+  if (!sizeOn || !pv3dObj) return;
+  if (typeof scene === 'undefined' || !scene) return;
+
+  var bb = pv3dModelBox(pv3dObj);
+  if (bb.isEmpty()) return;
+  var 尺寸 = bb.getSize(new THREE.Vector3());
+  var 宽 = 尺寸.x, 深 = 尺寸.z, 高 = 尺寸.y;
+  var maxDim = Math.max(宽, 高, 深) || 1;
+  var 留白 = Math.max(0.05, maxDim * 0.06);
+
+  var 组 = new THREE.Group();
+  组.userData.__size = true;
+
+  /* ---- 地面 1 米网格：中心吸到整数米，线就落在世界整数坐标上 ---- */
+  var 格数 = Math.max(4, Math.min(20, Math.ceil(maxDim) + 2));
+  var 网格 = new THREE.GridHelper(格数, 格数, 0xc9b79f, 0xe6dccd);
+  网格.position.set(0, bb.min.y, 0);
+  网格.userData.__size = true;
+  组.add(网格);
+  /* ⚠️ GridHelper 的 `material` 可能是个数组（three 新版本按轴分材质），
+     逐个改，别假设就一个。 */
+  (Array.isArray(网格.material) ? 网格.material : [网格.material]).forEach(function(m){
+    m.transparent = true; m.opacity = 0.85; m.depthWrite = false;
+  });
+
+  var 色 = 0x8a4b1e;
+  var 刻度 = maxDim * 0.025;          // 尺寸线两端的短刻度
+  var 字高 = maxDim * 0.075;
+
+  /* ---- 宽（沿 X，摆在 z = max.z + 留白）---- */
+  var zW = bb.max.z + 留白;
+  var 宽线 = pv3dSizeLine([
+    new THREE.Vector3(bb.min.x, bb.min.y, zW),
+    new THREE.Vector3(bb.max.x, bb.min.y, zW),
+  ], 色);
+  组.add(宽线);
+  组.add(pv3dSizeLine([                       // 两端刻度
+    new THREE.Vector3(bb.min.x, bb.min.y, zW - 刻度),
+    new THREE.Vector3(bb.min.x, bb.min.y, zW + 刻度),
+  ], 色));
+  组.add(pv3dSizeLine([
+    new THREE.Vector3(bb.max.x, bb.min.y, zW - 刻度),
+    new THREE.Vector3(bb.max.x, bb.min.y, zW + 刻度),
+  ], 色));
+  var 宽标 = pv3dSizeLabel('宽 ' + 宽.toFixed(2) + ' m', 字高);
+  宽标.position.set((bb.min.x + bb.max.x) / 2, bb.min.y, zW + 留白 * 0.8);
+  组.add(宽标);
+
+  /* ---- 深（沿 Z，摆在 x = max.x + 留白）---- */
+  var xD = bb.max.x + 留白;
+  组.add(pv3dSizeLine([
+    new THREE.Vector3(xD, bb.min.y, bb.min.z),
+    new THREE.Vector3(xD, bb.min.y, bb.max.z),
+  ], 色));
+  组.add(pv3dSizeLine([
+    new THREE.Vector3(xD - 刻度, bb.min.y, bb.min.z),
+    new THREE.Vector3(xD + 刻度, bb.min.y, bb.min.z),
+  ], 色));
+  组.add(pv3dSizeLine([
+    new THREE.Vector3(xD - 刻度, bb.min.y, bb.max.z),
+    new THREE.Vector3(xD + 刻度, bb.min.y, bb.max.z),
+  ], 色));
+  var 深标 = pv3dSizeLabel('深 ' + 深.toFixed(2) + ' m', 字高);
+  深标.position.set(xD + 留白 * 0.8, bb.min.y, (bb.min.z + bb.max.z) / 2);
+  组.add(深标);
+
+  /* ---- 高（沿 Y，摆在 x/z 都往外让一截的角上）---- */
+  var xH = bb.max.x + 留白, zH = bb.max.z + 留白;
+  组.add(pv3dSizeLine([
+    new THREE.Vector3(xH, bb.min.y, zH),
+    new THREE.Vector3(xH, bb.max.y, zH),
+  ], 色));
+  组.add(pv3dSizeLine([
+    new THREE.Vector3(xH - 刻度, bb.min.y, zH),
+    new THREE.Vector3(xH + 刻度, bb.min.y, zH),
+  ], 色));
+  组.add(pv3dSizeLine([
+    new THREE.Vector3(xH - 刻度, bb.max.y, zH),
+    new THREE.Vector3(xH + 刻度, bb.max.y, zH),
+  ], 色));
+  var 高标 = pv3dSizeLabel('高 ' + 高.toFixed(2) + ' m', 字高);
+  高标.position.set(xH + 留白 * 0.8, (bb.min.y + bb.max.y) / 2, zH);
+  组.add(高标);
+
+  scene.add(组);
+}
+
+/* ---------- 「模型信息」（阿聪 2026-11-03）----------
+   点了**直接用浏览器的纯文本方式打开模型文件里的原始 glTF JSON**
+   （`text/plain`，没有我们的任何 UI / 样式 / 加工）——
+   阿聪要自己 Ctrl+F 查 `nodes` 里的 `scale`，不是看我们喂的结论。
+   ⚠️ GLB 的结构：12 字节头 + 分块；第 0 块就是 JSON。
+      这里只把 JSON 块原样解出来、pretty-print 一下方便读；
+      不计算、不改写、不筛字段。 */
+
+var pv3dRawText = '';
+var pv3dRawJSON = null;
+
+function pv3d读原始文本(url){
+  pv3dRawText = '';
+  pv3dRawJSON = null;
+  try{
+    fetch(url).then(function(r){ return r.arrayBuffer(); }).then(function(buf){
+      var 原 = '';
+      var dv = new DataView(buf);
+      if (buf.byteLength >= 12 && dv.getUint32(0, true) === 0x46546C67){
+        var 偏移 = 12;
+        while (偏移 + 8 <= buf.byteLength){
+          var 长 = dv.getUint32(偏移, true);
+          var 型 = dv.getUint32(偏移 + 4, true);
+          var 起 = 偏移 + 8;
+          偏移 = 起 + 长;
+          if (型 === 0x4E4F534A){
+            原 = new TextDecoder('utf-8').decode(buf.slice(起, 起 + 长));
+            break;
+          }
+        }
+      } else {
+        原 = new TextDecoder('utf-8').decode(buf);
+      }
+      if (!原) return;
+      try{
+        pv3dRawJSON = JSON.parse(原);
+        pv3dRawText = JSON.stringify(pv3dRawJSON, null, 2);
+      }catch(e){
+        pv3dRawText = 原;
+      }
+    }).catch(function(){});
+  }catch(e){}
+}
+
+/* 只摘根节点：`scenes[0].nodes` 列出的那几个节点，**原始对象原样**，
+   不计算、不判断 —— 只是把范围缩到验收第 2 条真正看的那几个，
+   免得在 415 个节点的 scale 里翻。 */
+function pv3dOpenRootPage(){
+  if (!pv3dObj){ alert('还没有加载模型'); return; }
+  if (!pv3dRawJSON){
+    alert('原始模型数据还没读完，稍等一下再点一次。');
+    return;
+  }
+  var 场景们 = pv3dRawJSON.scenes || [];
+  var 节点们 = pv3dRawJSON.nodes || [];
+  var 根号 = (场景们[0] && 场景们[0].nodes) || [];
+  var 文本 = '场景根节点\n'
+    + '（模型文件 scenes[0].nodes 列出的节点，原始对象，未改字段）\n\n';
+  if (!根号.length) 文本 += '(没有根节点)\n';
+  根号.forEach(function(号, k){
+    文本 += '根节点 ' + (k + 1) + ' = nodes[' + 号 + ']\n'
+      + JSON.stringify(节点们[号], null, 2) + '\n\n';
+  });
+  var blob = new Blob([文本], { type: 'text/plain;charset=utf-8' });
+  window.open(URL.createObjectURL(blob), '_blank');
+}
+
+function pv3dOpenInfoPage(){
+  if (!pv3dObj){ alert('还没有加载模型'); return; }
+  /* ⚠️ window.open 必须在点击这一下同步调用 —— 异步回调里会被浏览器当弹窗拦掉。
+     所以原始文本在模型加载时就先读好（见 `pv3d读原始文本`），这里只负责开。 */
+  var 文本 = pv3dRawText
+    || '原始模型数据还没读完，稍等一下再点一次「模型信息」。';
+  var blob = new Blob([文本], { type: 'text/plain;charset=utf-8' });
+  window.open(URL.createObjectURL(blob), '_blank');
 }
 
 /* ---------- 「显示面朝向」（阿聪 2026-10-15）----------
@@ -2525,6 +3287,8 @@ window.pv3dOpen = function(url, name, srcUrls, realName, opts){
       sb.hidden = !(srcUrls && srcUrls.length);
     }
     clearHolder();
+    /* 先把原始 glTF JSON 读好，「模型信息」点开时才能同步 window.open（太快会被拦）。 */
+    pv3d读原始文本(url);
     new GLTFLoader().load(url, function(g){
       var obj = g.scene || g.scenes[0];
       holder.add(obj);
@@ -2540,6 +3304,13 @@ window.pv3dOpen = function(url, name, srcUrls, realName, opts){
 
       // 左侧那两样：填真实面数、布线开关归位
       pv3dObj = obj;
+
+      /* 朝向：先检测并转成 Y-up，再重新取景（旋转后包围盒变了）。 */
+      pv3dDetectAndApplyUp();
+      pv3dObj.updateMatrixWorld(true);
+      frame(obj);
+      /* 朝向检测结果只留在 `pv3dUpInfo` 里给验收规则用，界面上不再摆那行小字
+         （阿聪 2026-11-03：「朝向 Y 确定那个小字不用了，简洁一点」）。 */
       var _tri = document.getElementById('pv3dTri');
       if (_tri) _tri.textContent = pv3dCountTri(obj).toLocaleString();
       /* 布线：宿主记过的样子优先，没有才从"没开"开始（原来是**每次打开都归零**的，
@@ -2557,6 +3328,11 @@ window.pv3dOpen = function(url, name, srcUrls, realName, opts){
       var _orb = document.getElementById('pv3dOrigin');
       if (_orb) _orb.classList.remove('did');
       pv3dApplyOrigin();
+      /* 🆕 「尺寸」—— 跟「显示原点」一样：每次打开都从"关"开始，顺手清掉上一个模型的线和网格。 */
+      sizeOn = false;
+      var _szb = document.getElementById('pv3dSize');
+      if (_szb) _szb.classList.remove('did');
+      pv3dApplySize();
       /* 🆕 「显示面朝向」（阿聪 2026-10-15）—— 跟「显示原点」一个规矩：
          **每次打开都从"关"开始**（它是一次性的排查工具，不该赖着不走）。
          顺手把上一个模型留下的 shader 改动还原掉（关着时 `pv3dApplyFacing` 就是"还原"）。 */
@@ -3150,6 +3926,11 @@ window.pv3dClose = function(){
   var _wb = document.getElementById('pv3dWeight');
   if (_wb) _wb.classList.remove('on');
   if (holder) clearHolder();
+  /* 模型已经 dispose，引用必须清掉：
+     否则关窗后 pv3dObjReady() 还是真，验收会对看不见的旧模型跑一遍。 */
+  pv3dObj = null;
+  pv3dBaseQuaternion = null;
+  pv3dUpInfo = { 轴: 'Y', 置信: '初始', 依据: '未检测' };
   /* 取出来再清 —— `pv3dClose` 可能被调两次（Esc + 点背景），别回报两遍 */
   if (pv3dOnClose){ var _cb = pv3dOnClose; pv3dOnClose = null; _cb(_vNow); }
 };
@@ -3596,6 +4377,27 @@ if (pv3dOriginBtn) pv3dOriginBtn.addEventListener('click', function(){
   originOn = !originOn;
   this.classList.toggle('did', originOn);
   pv3dApplyOrigin();
+});
+
+/* 🆕 「尺寸」开关（见上面的 `pv3dApplySize`）—— 跟「显示原点」一个套路，
+   **不抢材质槽**，点了直接重画。 */
+var pv3dSizeBtn = document.getElementById('pv3dSize');
+if (pv3dSizeBtn) pv3dSizeBtn.addEventListener('click', function(){
+  sizeOn = !sizeOn;
+  this.classList.toggle('did', sizeOn);
+  pv3dApplySize();
+});
+
+/* 🆕 「模型信息」（见上面的 `pv3dOpenInfoPage`）—— 点了另开一个只读页面。 */
+var pv3dInfoBtn = document.getElementById('pv3dInfo');
+if (pv3dInfoBtn) pv3dInfoBtn.addEventListener('click', function(){
+  pv3dOpenInfoPage();
+});
+
+/* 🆕 「根节点」—— 只摘场景根节点的原始对象（见 `pv3dOpenRootPage`）。 */
+var pv3dRootBtn = document.getElementById('pv3dRoot');
+if (pv3dRootBtn) pv3dRootBtn.addEventListener('click', function(){
+  pv3dOpenRootPage();
 });
 
 /* 🆕「显示面朝向」（见上面的 `pv3dApplyFacing`）—— 跟「显示原点」一个套路。
